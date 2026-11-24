@@ -43,7 +43,7 @@ async function launch() {
   }, 'portable EXE to extract and expose its Chromium test port');
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   page = await until(() => browser.contexts()[0].pages().find(candidate => candidate.url().includes('index.html')), 'packaged main page');
-  await page.getByTestId('calendar-view').waitFor({ state: 'visible', timeout: 30000 });
+  await page.getByTestId('week-calendar').waitFor({ state: 'visible', timeout: 30000 });
   result.launchMs.push(Math.round(performance.now() - started));
   result.version = await page.evaluate(() => window.workbench.version());
 }

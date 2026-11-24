@@ -29,7 +29,7 @@ async function main() {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
-  await page.getByTestId('calendar-view').waitFor();
+  await page.getByTestId('week-calendar').waitFor();
   await page.screenshot({ path: path.join(output, 'empty-desktop.png'), fullPage: true });
   for (const title of ['整理本周报销材料', '确认会议室预约', '准备办公用品采购单']) {
     await page.getByRole('button', { name: '新建待办', exact: true }).click();

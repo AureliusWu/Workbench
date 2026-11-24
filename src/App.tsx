@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Flower2,
   LayoutDashboard,
@@ -27,20 +27,30 @@ import {
   Sparkles,
   ArrowUpRight,
   Trash2,
-  Pencil,
   ChevronDown,
   ChevronUp,
   Download,
   Upload,
-  Heart,
   Clock3,
   CheckCheck,
   CircleHelp,
   Repeat2,
 } from "lucide-react";
 import type { AppState, Task, Note, Priority, FileEntry } from "./types";
-import { loadState, saveState, newState, uid, localDate } from "./state";
+import {
+  loadState,
+  saveState,
+  newState,
+  uid,
+  localDate,
+  withNoteDefaults,
+} from "./state";
 import { version as appVersion } from "../package.json";
+import NotesPanel from "./components/NotesPanel";
+import { WeekCalendar } from "./components/WeekCalendar";
+import { ReviewTools } from "./components/ReviewTools";
+import { parseQuickTask } from "./lib/quickTask";
+import "./workspace.css";
 import {
   getDayInfo,
   monthCells,
@@ -53,6 +63,7 @@ import {
   planTask,
   deleteTask,
   nextOccurrenceDate,
+  weeklyStats,
 } from "./lib";
 
 type View = "today" | "calendar" | "tasks" | "notes" | "review" | "files";
@@ -79,61 +90,6 @@ function taskCollection(state: AppState, today: string): Task[] {
   return [...new Map(items.map((t) => [t.id, t])).values()];
 }
 
-function FlowerArt() {
-  return (
-    <div className="flower-art" aria-hidden="true">
-      <svg viewBox="0 0 220 150">
-        <path
-          d="M105 139Q110 99 145 65M110 118Q80 112 68 88Q100 83 112 110M121 97Q147 106 165 90Q149 76 128 88"
-          fill="#9dad91"
-          stroke="#71876b"
-          strokeWidth="2"
-        />
-        <g transform="translate(146 49) rotate(18)">
-          <ellipse cy="-22" rx="14" ry="24" fill="#efbad0" />
-          <ellipse
-            cy="-22"
-            rx="14"
-            ry="24"
-            fill="#efbad0"
-            transform="rotate(72)"
-          />
-          <ellipse
-            cy="-22"
-            rx="14"
-            ry="24"
-            fill="#efbad0"
-            transform="rotate(144)"
-          />
-          <ellipse
-            cy="-22"
-            rx="14"
-            ry="24"
-            fill="#efbad0"
-            transform="rotate(216)"
-          />
-          <ellipse
-            cy="-22"
-            rx="14"
-            ry="24"
-            fill="#efbad0"
-            transform="rotate(288)"
-          />
-          <circle r="13" fill="#fff0c2" />
-          <circle r="5" fill="#c69662" />
-        </g>
-        <path d="M48 45l3-9 3 9 9 3-9 3-3 9-3-9-9-3z" fill="#cab5d4" />
-        <circle cx="191" cy="109" r="4" fill="#eac7d8" />
-        <path
-          d="M32 126q22-8 39 0"
-          stroke="#e6c6d2"
-          fill="none"
-          strokeWidth="2"
-        />
-      </svg>
-    </div>
-  );
-}
 export default function App() {
   const [state, setState] = useState<AppState>(newState);
   const [ready, setReady] = useState(false);
@@ -153,6 +109,14 @@ export default function App() {
   const [noteText, setNoteText] = useState("");
   const [editingNote, setEditingNote] = useState<string | null>(null);
   const [noteColor, setNoteColor] = useState<Note["color"]>("yellow");
+  const [noteTagIds, setNoteTagIds] = useState<string[]>([]);
+  const [quickText, setQuickText] = useState("");
+  const [quickFeedback, setQuickFeedback] = useState<{
+    text: string;
+    error?: boolean;
+  } | null>(null);
+  const [dashboardWeek, setDashboardWeek] = useState<string | null>(null);
+  const [taskDateOverride, setTaskDateOverride] = useState<string | null>(null);
   const [focusEnd, setFocusEnd] = useState<number | null>(null);
   const [remaining, setRemaining] = useState(25 * 60);
   const [focusMode, setFocusMode] = useState<"focus" | "break">("focus");
@@ -164,6 +128,9 @@ export default function App() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [fileFilter, setFileFilter] = useState("全部");
   const saveQueue = useRef(Promise.resolve());
+  const lastStored = useRef<AppState | null>(null);
+  const importing = useRef(false);
+  const [importBusy, setImportBusy] = useState(false);
   const focusHandled = useRef(false);
   const focusPlanned = useRef(25);
   const tell = (message: string) => {
@@ -177,28 +144,36 @@ export default function App() {
     }
   };
   useEffect(() => {
+    let mounted = true;
     loadState()
       .then((s) => {
+        if (!mounted) return;
+        lastStored.current = s;
         setState(s);
         setRemaining(s.settings.focusMinutes * 60);
         setReady(true);
       })
-      .catch((e) =>
-        setError(`无法读取本地数据：${e.message}。请保留数据文件后重启。`),
-      );
+      .catch((e) => {
+        if (mounted)
+          setError(`无法读取本地数据：${e.message}。请保留数据文件后重启。`);
+      });
+    return () => {
+      mounted = false;
+    };
   }, []);
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || importing.current || state === lastStored.current) return;
     saveQueue.current = saveQueue.current
       .catch(() => {})
       .then(async () => {
         await saveState(state);
+        lastStored.current = state;
         setError("");
       })
       .catch((e) => {
         setError(`保存失败：${e.message}。请先导出备份。`);
       });
-  }, [state, ready]);
+  }, [state, ready, importBusy]);
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
@@ -209,7 +184,7 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
   useEffect(() => {
-    if (!focusEnd) return;
+    if (!focusEnd || importing.current) return;
     const n = Math.max(0, Math.ceil((focusEnd - Date.now()) / 1000));
     setRemaining(n);
     if (n === 0 && !focusHandled.current) {
@@ -240,7 +215,7 @@ export default function App() {
         );
       } else tell("休息结束，准备好再出发。");
     }
-  }, [now, focusEnd, focusMode, today, focusTask]);
+  }, [now, focusEnd, focusMode, today, focusTask, importBusy]);
   useEffect(() => {
     if (!focusEnd && remaining === 0)
       setRemaining(
@@ -253,10 +228,12 @@ export default function App() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setTaskModal(null);
+        setTaskDateOverride(null);
         setSettingsOpen(false);
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "n") {
         e.preventDefault();
+        setTaskDateOverride(null);
         setTaskModal("new");
       }
     };
@@ -264,6 +241,98 @@ export default function App() {
     return () => document.removeEventListener("keydown", handler);
   }, []);
   const change = (fn: (s: AppState) => AppState) => setState(fn);
+  async function restoreFromBackup() {
+    if (!window.workbench || importing.current) return false;
+    importing.current = true;
+    setImportBusy(true);
+    try {
+      await saveQueue.current;
+      const data = await window.workbench.importData();
+      if (!data) return false;
+      const restored = withNoteDefaults(data);
+      lastStored.current = restored;
+      setState(restored);
+      if (!focusEnd)
+        setRemaining(
+          (focusMode === "focus"
+            ? restored.settings.focusMinutes
+            : restored.settings.breakMinutes) * 60,
+        );
+      setEditingNote(null);
+      setNoteTagIds([]);
+      setError("");
+      setReady(true);
+      tell("备份已恢复");
+      return true;
+    } finally {
+      importing.current = false;
+      setImportBusy(false);
+    }
+  }
+  const currentWeek = weekStart(today);
+  const visibleWeek = dashboardWeek ?? currentWeek;
+  const visibleDays = useMemo(
+    () => Array.from({ length: 7 }, (_, index) => addDays(visibleWeek, index)),
+    [visibleWeek],
+  );
+  const dashboardTasks = useMemo(() => {
+    const scheduled = visibleDays.flatMap((day) =>
+      tasksForDate(state.tasks, day),
+    );
+    const unscheduled =
+      visibleWeek === currentWeek
+        ? state.tasks.filter((task) => !task.date)
+        : [];
+    return [...scheduled, ...unscheduled].sort(
+      (a, b) => Number(a.done) - Number(b.done),
+    );
+  }, [visibleDays, state.tasks, currentWeek, visibleWeek]);
+  const dashboardStats = useMemo(
+    () => weeklyStats(state, visibleWeek),
+    [state, visibleWeek],
+  );
+  const createTask = useCallback((date?: string) => {
+    setTaskDateOverride(date ?? null);
+    setTaskModal("new");
+  }, []);
+  function submitQuickTask() {
+    try {
+      const { title, date, time, reminder, warning } = parseQuickTask(
+        quickText,
+        today,
+      );
+      const task: Task = {
+        id: uid(),
+        title,
+        date,
+        time,
+        reminder,
+        priority: "medium",
+        done: false,
+        createdAt: new Date().toISOString(),
+        steps: [],
+        repeat: "none",
+        estimate: 25,
+      };
+      change((current) => ({ ...current, tasks: [...current.tasks, task] }));
+      const taskWeek = weekStart(date || today);
+      setDashboardWeek(taskWeek === currentWeek ? null : taskWeek);
+      setQuickText("");
+      setQuickFeedback({
+        text: warning
+          ? `已添加「${title}」。${warning}`
+          : `已添加「${title}」 · ${date ? `${date}${time ? ` ${time}` : ""}` : "未安排日期"}`,
+      });
+    } catch (error) {
+      setQuickFeedback({
+        text:
+          error instanceof Error
+            ? error.message
+            : "无法识别日期，请换一种写法。",
+        error: true,
+      });
+    }
+  }
   const dayTasks = useMemo(
     () => tasksForDate(state.tasks, view === "calendar" ? selected : today),
     [state.tasks, view, selected, today],
@@ -320,26 +389,40 @@ export default function App() {
   };
   const saveNote = () => {
     if (!noteText.trim()) return;
-    change((s) => ({
-      ...s,
-      notes: editingNote
-        ? s.notes.map((n) =>
-            n.id === editingNote
-              ? { ...n, text: noteText.trim(), color: noteColor }
-              : n,
-          )
-        : [
-            {
-              id: uid(),
-              text: noteText.trim(),
-              color: noteColor,
-              createdAt: new Date().toISOString(),
-            },
-            ...s.notes,
-          ],
-    }));
+    if (editingNote && !state.notes.some((note) => note.id === editingNote)) {
+      setEditingNote(null);
+      tell("原便笺已删除。草稿仍在，可另存为新便笺。");
+      return;
+    }
+    const id = editingNote ?? uid();
+    const createdAt = new Date().toISOString();
+    change((s) => {
+      const tagIds = noteTagIds.filter((tagId) =>
+        s.noteTags.some((tag) => tag.id === tagId),
+      );
+      return {
+        ...s,
+        notes: s.notes.some((note) => note.id === id)
+          ? s.notes.map((n) =>
+              n.id === id
+                ? { ...n, text: noteText.trim(), color: noteColor, tagIds }
+                : n,
+            )
+          : [
+              {
+                id,
+                text: noteText.trim(),
+                color: noteColor,
+                createdAt,
+                tagIds,
+              },
+              ...s.notes,
+            ],
+      };
+    });
     setNoteText("");
     setEditingNote(null);
+    setNoteTagIds([]);
     tell("想法已收好");
   };
   function taskRow(t: Task) {
@@ -369,12 +452,9 @@ export default function App() {
       </button>
     </div>
   );
-  function miniCalendar(compact = false) {
+  function monthCalendar() {
     return (
-      <section
-        className={`card calendar-card ${compact ? "compact-calendar" : ""}`}
-        data-testid="calendar-view"
-      >
+      <section className="card calendar-card" data-testid="calendar-view">
         <div className="card-heading">
           <h2>
             {month.getFullYear()} 年 {month.getMonth() + 1} 月
@@ -424,16 +504,13 @@ export default function App() {
                 title={`${d} ${info.reason}`}
                 onClick={() => {
                   setSelected(d);
-                  if (compact) setView("calendar");
                 }}
                 aria-label={`${d} ${info.label}`}
               >
                 <span className="day-number">{Number(d.slice(-2))}</span>
-                {!compact && (
-                  <span className="lunar-label">
-                    {info.holiday || info.lunar}
-                  </span>
-                )}
+                <span className="lunar-label">
+                  {info.holiday || info.lunar}
+                </span>
                 {!outside && info.label && (
                   <span
                     className={`work-badge ${info.isWorkday ? "work" : "rest"}`}
@@ -441,11 +518,7 @@ export default function App() {
                     {info.label}
                   </span>
                 )}
-                {n > 0 && (
-                  <span className="event-dot">
-                    {compact ? "•" : `${n} 件待办`}
-                  </span>
-                )}
+                {n > 0 && <span className="event-dot">{n} 件待办</span>}
               </button>
             );
           })}
@@ -470,17 +543,40 @@ export default function App() {
       </section>
     );
   }
-  function noteComposer() {
+  function noteComposer(showTags = false) {
     return (
       <>
         <textarea
           data-testid="note-input"
+          aria-label="便笺正文"
           className="note-editor"
           placeholder="突然想到的、还没理清的，都先放在这里……"
           value={noteText}
           onChange={(e) => setNoteText(e.target.value)}
           maxLength={20000}
         />
+        {showTags && state.noteTags.length > 0 && (
+          <fieldset className="note-tag-picker">
+            <legend>便笺标签</legend>
+            {state.noteTags.map((tag) => (
+              <label className="note-tag" key={tag.id}>
+                <input
+                  type="checkbox"
+                  checked={noteTagIds.includes(tag.id)}
+                  onChange={(event) => {
+                    const checked = event.target.checked;
+                    setNoteTagIds((current) =>
+                      checked
+                        ? [...current, tag.id]
+                        : current.filter((id) => id !== tag.id),
+                    );
+                  }}
+                />
+                {tag.name}
+              </label>
+            ))}
+          </fieldset>
+        )}
         <div className="note-tools">
           <div className="color-picker">
             {(["yellow", "pink", "lavender", "mint"] as const).map((c) => (
@@ -501,6 +597,18 @@ export default function App() {
             {editingNote ? "保存修改" : "收好想法"}
             <ArrowUpRight size={14} />
           </button>
+          {editingNote && (
+            <button
+              className="text-button"
+              onClick={() => {
+                setEditingNote(null);
+                setNoteText("");
+                setNoteTagIds([]);
+              }}
+            >
+              取消编辑
+            </button>
+          )}
         </div>
       </>
     );
@@ -516,13 +624,7 @@ export default function App() {
           <button
             onClick={async () => {
               try {
-                const restored = await window.workbench?.importData();
-                if (restored) {
-                  setState(restored);
-                  setError("");
-                  setRemaining(restored.settings.focusMinutes * 60);
-                  setReady(true);
-                }
+                await restoreFromBackup();
               } catch (e) {
                 setError(e instanceof Error ? e.message : String(e));
               }
@@ -531,6 +633,13 @@ export default function App() {
             导入有效备份
           </button>
         </div>
+      </div>
+    );
+  if (!ready)
+    return (
+      <div className="fatal" role="status">
+        <Flower2 />
+        <p>正在读取本机工作台…</p>
       </div>
     );
   return (
@@ -567,6 +676,7 @@ export default function App() {
         <div className="sidebar-tools">
           <span className="section-label">桌面小工具</span>
           <button
+            title="截图并贴图"
             onClick={() =>
               run(async () => {
                 if (!window.workbench)
@@ -579,6 +689,7 @@ export default function App() {
             截图并贴图<span>Ctrl+Alt+A</span>
           </button>
           <button
+            title="剪贴板贴图"
             onClick={() =>
               run(async () => {
                 if (!window.workbench)
@@ -614,6 +725,7 @@ export default function App() {
           </div>
           <button
             className="settings-button"
+            title="偏好设置"
             onClick={() => setSettingsOpen(true)}
           >
             <Settings2 size={17} />
@@ -621,7 +733,7 @@ export default function App() {
           </button>
         </div>
       </aside>
-      <main className="main">
+      <main className={`main ${view === "today" ? "workbench-home" : ""}`}>
         <header className="titlebar">
           <div className="breadcrumb">
             我的空间<span>/</span>
@@ -680,7 +792,7 @@ export default function App() {
               <p>
                 {
                   {
-                    today: "把琐碎安排妥当，把时间留给喜欢的事。",
+                    today: `${now.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })} · ${dayInfo.reason} · ${dayInfo.lunar}`,
                     calendar: "每一个值得记住的日子，都有自己的位置。",
                     tasks: "大事拆小，逐个完成。",
                     notes: "灵感不必完整，先记下来就很好。",
@@ -690,10 +802,7 @@ export default function App() {
                 }
               </p>
             </div>
-            <button
-              className="primary-button"
-              onClick={() => setTaskModal("new")}
-            >
+            <button className="primary-button" onClick={() => createTask()}>
               <Plus size={17} />
               新建待办
             </button>
@@ -714,83 +823,115 @@ export default function App() {
           )}
           {view === "today" && (
             <>
-              <section className="welcome-banner">
-                <div className="welcome-date">
-                  <span>
-                    {now.toLocaleDateString("zh-CN", { month: "long" })}
-                  </span>
-                  <strong>{now.getDate()}</strong>
-                  <small>
-                    星期
-                    {["日", "一", "二", "三", "四", "五", "六"][now.getDay()]}
-                  </small>
+              <div className="week-toolbar">
+                <div
+                  className="inline week-navigation"
+                  aria-label="切换工作台周次"
+                >
+                  <button
+                    className="icon-button"
+                    aria-label="上一周"
+                    onClick={() => setDashboardWeek(addDays(visibleWeek, -7))}
+                  >
+                    <ChevronLeft size={19} />
+                  </button>
+                  <strong data-testid="dashboard-week">
+                    {visibleWeek} — {visibleDays[6]}
+                  </strong>
+                  <button
+                    className="icon-button"
+                    aria-label="下一周"
+                    onClick={() => setDashboardWeek(addDays(visibleWeek, 7))}
+                  >
+                    <ChevronRight size={19} />
+                  </button>
+                  <button
+                    className="secondary-button"
+                    onClick={() => setDashboardWeek(null)}
+                  >
+                    本周
+                  </button>
                 </div>
-                <div className="welcome-message">
-                  <span className="soft-pill">
-                    <Flower2 size={13} />
-                    {dayInfo.isWorkday ? "今日工作日" : "今日休息日"}
-                  </span>
-                  <h2>
-                    一件一件来，
-                    <br />
-                    小小的完成也很闪亮。
-                  </h2>
-                  <p>
-                    {dayInfo.reason} · {dayInfo.lunar}
-                  </p>
-                </div>
-                <FlowerArt />
-                <div className="banner-note">
-                  给忙碌生活
-                  <br />
-                  留一朵花的位置 <Heart size={12} />
-                </div>
-              </section>
-              <div className="summary-row">
-                <div>
-                  <span className="summary-icon pink">
-                    <ListTodo size={20} />
-                  </span>
-                  <div>
-                    <span>今日待办</span>
-                    <strong>
-                      {activeToday.length - doneToday}
-                      <small> 件待完成</small>
-                    </strong>
-                  </div>
-                </div>
-                <div>
-                  <span className="summary-icon mint">
-                    <CheckCheck size={20} />
-                  </span>
-                  <div>
-                    <span>今日已完成</span>
-                    <strong>
-                      {doneToday}
-                      <small> / {activeToday.length} 件</small>
-                    </strong>
-                  </div>
-                </div>
-                <div>
-                  <span className="summary-icon lavender">
-                    <Clock3 size={20} />
-                  </span>
-                  <div>
-                    <span>今日专注</span>
-                    <strong>
-                      {focusToday}
-                      <small> 分钟</small>
-                    </strong>
-                  </div>
-                </div>
+                <button
+                  className="text-button"
+                  onClick={() => {
+                    setReviewDate(visibleWeek);
+                    setAiText("");
+                    setView("review");
+                  }}
+                >
+                  <ChartNoAxesCombined size={15} />
+                  查看此周复盘 · {dashboardStats.completed}/{dashboardStats.total} 已完成
+                </button>
               </div>
-              <div className="dashboard-grid">
-                <div className="dashboard-main">
-                  <section className="card tasks-card">
+              <form
+                className="quick-task"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (quickText.trim()) submitQuickTask();
+                }}
+              >
+                <label htmlFor="quick-task-input">一句话创建待办</label>
+                <div className="quick-task-field">
+                  <input
+                    id="quick-task-input"
+                    value={quickText}
+                    onChange={(event) => {
+                      setQuickText(event.target.value);
+                      setQuickFeedback(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key === "Enter" &&
+                        (event.nativeEvent.isComposing ||
+                          event.nativeEvent.keyCode === 229)
+                      )
+                        event.preventDefault();
+                    }}
+                    placeholder="例如：明天下午三点开会"
+                    maxLength={360}
+                    aria-describedby="quick-task-feedback"
+                  />
+                  <button
+                    className="primary-button"
+                    disabled={!quickText.trim()}
+                  >
+                    <Plus size={16} />
+                    添加
+                  </button>
+                </div>
+                <p
+                  id="quick-task-feedback"
+                  className={
+                    quickFeedback?.error ? "quick-task-error" : "subtle"
+                  }
+                  role="status"
+                >
+                  {quickFeedback?.text ??
+                    "按 Enter 添加。日期可留空，从待办清单安排。"}
+                </p>
+              </form>
+              <div className="week-workspace">
+                <WeekCalendar
+                  start={visibleWeek}
+                  today={today}
+                  tasks={state.tasks}
+                  settings={state.settings}
+                  onTaskClick={setTaskModal}
+                  onDayClick={createTask}
+                />
+                <aside className="week-sidebar" aria-label="待办与便笺">
+                  <section className="card week-task-panel">
                     <div className="card-heading">
                       <div className="inline">
-                        <h2>今天的小计划</h2>
-                        <span className="count-tag">{activeToday.length}</span>
+                        <h2>
+                          {visibleWeek === currentWeek
+                            ? "本周待办"
+                            : "所选周待办"}
+                        </h2>
+                        <span className="count-tag">
+                          {dashboardTasks.length}
+                        </span>
                       </div>
                       <button
                         className="text-button muted"
@@ -800,82 +941,74 @@ export default function App() {
                         <ChevronRight size={14} />
                       </button>
                     </div>
-                    <div className="task-list">
-                      {activeToday.length
-                        ? activeToday
-                            .sort(
-                              (a, b) =>
-                                Number(a.done) - Number(b.done) ||
-                                { high: 0, medium: 1, low: 2 }[a.priority] -
-                                  { high: 0, medium: 1, low: 2 }[b.priority],
-                            )
-                            .map(taskRow)
-                        : taskEmpty}
-                    </div>
-                    <button
-                      className="add-task-inline"
-                      onClick={() => setTaskModal("new")}
+                    <div
+                      className="task-list week-task-list"
+                      tabIndex={0}
+                      aria-label="所选周的待办清单"
                     >
-                      <Plus size={16} />
-                      添加一件小事<span>Ctrl + N</span>
-                    </button>
+                      {dashboardTasks.length ? (
+                        dashboardTasks.map(taskRow)
+                      ) : (
+                        <p className="subtle week-panel-empty">
+                          这周还没有待办。
+                        </p>
+                      )}
+                    </div>
                   </section>
-                  <div className="dashboard-lower">
-                    {miniCalendar(true)}
-                    <section className="card week-glance">
-                      <div className="card-heading">
-                        <h2>这周的脚印</h2>
-                        <button
-                          className="icon-button"
-                          aria-label="查看周度复盘"
-                          onClick={() => setView("review")}
-                        >
-                          <ArrowUpRight size={16} />
-                        </button>
-                      </div>
-                      <div className="week-rate">
-                        <strong>
-                          {weekRate}
-                          <small>%</small>
-                        </strong>
-                        <span>
-                          本周计划完成率
-                          <br />
-                          <b>
-                            {weekDone} / {weekTasks.length} 件
-                          </b>
-                        </span>
-                      </div>
-                      <div className="bar-chart">
-                        {days.map((d, i) => {
-                          const ts = tasksForDate(state.tasks, d);
-                          const ratio = ts.length
-                            ? ts.filter((t) => t.done).length / ts.length
-                            : 0;
-                          return (
-                            <div
-                              key={d}
-                              title={`${d} 完成 ${ts.filter((t) => t.done).length}/${ts.length}`}
-                            >
-                              <div className="bar-track">
-                                <i style={{ height: `${ratio * 100}%` }} />
-                              </div>
-                              <span
-                                className={d === today ? "today-label" : ""}
-                              >
-                                {dayNames[i]}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <p className="gentle-note">
-                        每一步都算数，别忘记肯定自己。
-                      </p>
-                    </section>
-                  </div>
-                </div>
-                <aside className="right-rail">
+                  <section className="card quick-note">
+                    <div className="card-heading">
+                      <h2>随手一记</h2>
+                      <button
+                        className="text-button muted"
+                        onClick={() => setView("notes")}
+                      >
+                        便笺与标签
+                        <ChevronRight size={14} />
+                      </button>
+                    </div>
+                    {noteComposer()}
+                    <div
+                      className="recent-notes"
+                      tabIndex={0}
+                      aria-label="最近便笺"
+                    >
+                      {state.notes
+                        .filter((note) => !note.archivedAt)
+                        .slice(0, 3)
+                        .map((note) => (
+                          <button
+                            type="button"
+                            title={note.text}
+                            className={`recent-note ${note.color}`}
+                            key={note.id}
+                            onClick={() => {
+                              setNoteText(note.text);
+                              setNoteColor(note.color);
+                              setNoteTagIds(note.tagIds);
+                              setEditingNote(note.id);
+                              setView("notes");
+                            }}
+                          >
+                            {note.text}
+                          </button>
+                        ))}
+                    </div>
+                  </section>
+                </aside>
+              </div>
+              <details className="card workspace-tools">
+                <summary>
+                  <span>
+                    <Coffee size={16} />
+                    专注与倒计时
+                  </span>
+                  <span className="subtle">
+                    {focusEnd
+                      ? `进行中 · ${String(Math.floor(remaining / 60)).padStart(2, "0")}:${String(remaining % 60).padStart(2, "0")}`
+                      : `今日专注 ${focusToday} 分钟`}
+                  </span>
+                </summary>
+                <div className="workspace-tools-content">
                   <section className="card focus-card">
                     <div className="card-heading">
                       <h2>
@@ -961,13 +1094,6 @@ export default function App() {
                     </div>
                     <p>专注时，世界可以等一等。</p>
                   </section>
-                  <section className="card quick-note">
-                    <div className="card-heading">
-                      <h2>随手一记</h2>
-                      <Pencil size={16} />
-                    </div>
-                    {noteComposer()}
-                  </section>
                   <section className="card countdown-card">
                     <div className="card-heading">
                       <h2>值得期待的日子</h2>
@@ -994,13 +1120,13 @@ export default function App() {
                       </div>
                     ))}
                   </section>
-                </aside>
-              </div>
+                </div>
+              </details>
             </>
           )}
           {view === "calendar" && (
             <div className="calendar-layout">
-              {miniCalendar()}
+              {monthCalendar()}
               <section className="card selected-day">
                 <div className="card-heading">
                   <h2>{selected.slice(5).replace("-", " 月 ")} 日</h2>
@@ -1050,7 +1176,7 @@ export default function App() {
                 </div>
                 <button
                   className="add-task-inline"
-                  onClick={() => setTaskModal("new")}
+                  onClick={() => createTask(selected)}
                 >
                   <Plus size={16} />
                   为这一天添加待办
@@ -1069,6 +1195,7 @@ export default function App() {
                     ["all", "全部"],
                     ["today", "今天"],
                     ["high", "高优先级"],
+                    ["unscheduled", "未排期"],
                     ["done", "已完成"],
                   ].map(([k, v]) => (
                     <button
@@ -1099,6 +1226,7 @@ export default function App() {
                     .filter(
                       (t) =>
                         (filter !== "high" || t.priority === "high") &&
+                        (filter !== "unscheduled" || !t.date) &&
                         (filter !== "done" || t.done) &&
                         t.title.toLowerCase().includes(query.toLowerCase()),
                     )
@@ -1113,68 +1241,24 @@ export default function App() {
             </section>
           )}
           {view === "notes" && (
-            <div className="notes-grid">
-              <section className={`note-card composer ${noteColor}`}>
-                <div className="card-heading">
-                  <h2>捕捉一个想法</h2>
-                  <Sparkles size={18} />
-                </div>
-                {noteComposer()}
-              </section>
-              {state.notes.map((n) => (
-                <article className={`note-card ${n.color}`} key={n.id}>
-                  <p className="note-body">{n.text}</p>
-                  <footer>
-                    <span>
-                      {new Date(n.createdAt).toLocaleDateString("zh-CN", {
-                        month: "long",
-                        day: "numeric",
-                      })}
-                    </span>
-                    <div className="inline">
-                      <button
-                        className="icon-button"
-                        aria-label="编辑便签"
-                        onClick={() => {
-                          setNoteText(n.text);
-                          setNoteColor(n.color);
-                          setEditingNote(n.id);
-                          tell("在左上角便签中修改，完成后点击保存修改");
-                        }}
-                      >
-                        <Pencil size={15} />
-                      </button>
-                      <button
-                        className="icon-button"
-                        aria-label="置顶便签到桌面"
-                        onClick={() =>
-                          run(async () => {
-                            if (!window.workbench)
-                              throw new Error("请在桌面版置顶便签");
-                            await window.workbench.pinNote(n.text);
-                          })
-                        }
-                      >
-                        <Pin size={15} />
-                      </button>
-                      <button
-                        className="icon-button"
-                        aria-label="删除便签"
-                        onClick={() => {
-                          if (confirm("删除这条便签？"))
-                            change((s) => ({
-                              ...s,
-                              notes: s.notes.filter((x) => x.id !== n.id),
-                            }));
-                        }}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  </footer>
-                </article>
-              ))}
-            </div>
+            <NotesPanel
+              state={state}
+              change={change}
+              composer={noteComposer(true)}
+              tell={tell}
+              onEdit={(note) => {
+                setNoteText(note.text);
+                setNoteColor(note.color);
+                setNoteTagIds(note.tagIds);
+                setEditingNote(note.id);
+              }}
+              onPin={(note) =>
+                run(async () => {
+                  if (!window.workbench) throw new Error("请在桌面版置顶便笺");
+                  await window.workbench.pinNote(note.text);
+                })
+              }
+            />
           )}
           {view === "review" && (
             <>
@@ -1208,12 +1292,40 @@ export default function App() {
                   <button
                     className="text-button"
                     disabled={aiBusy}
-                    onClick={() => setReviewDate(today)}
+                    onClick={() => {
+                      setReviewDate(today);
+                      setAiText("");
+                    }}
                   >
                     本周
                   </button>
                 </div>
-                <span className="subtle">周一开始，周日收尾</span>
+                <ReviewTools
+                  selectedDate={reviewDate}
+                  state={state}
+                  onSelectDate={(date) => {
+                    if (!aiBusy) {
+                      setReviewDate(date);
+                      setAiText("");
+                    }
+                  }}
+                  onExport={async (payload) => {
+                    if (window.workbench)
+                      return window.workbench.exportReview(payload);
+                    const url = URL.createObjectURL(
+                      new Blob([payload.markdown], {
+                        type: "text/markdown;charset=utf-8",
+                      }),
+                    );
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.download = `周总结_${payload.weekStart}_至_${payload.weekEnd}.md`;
+                    link.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    return true;
+                  }}
+                  onNotice={tell}
+                />
               </section>
               <div className="review-metrics">
                 <section className="card">
@@ -1278,12 +1390,14 @@ export default function App() {
                     <textarea
                       placeholder="做得好的地方、遇到的困难、下周想做的小调整……"
                       value={state.reviews[days[0]] || ""}
-                      onChange={(e) =>
+                      maxLength={100000}
+                      onChange={(e) => {
+                        const review = e.target.value;
                         change((s) => ({
                           ...s,
-                          reviews: { ...s.reviews, [days[0]]: e.target.value },
-                        }))
-                      }
+                          reviews: { ...s.reviews, [days[0]]: review },
+                        }));
+                      }}
                     />
                   </label>
                   <span className="subtle">复盘笔记自动保存</span>
@@ -1477,13 +1591,17 @@ export default function App() {
               )}
             </section>
           )}
-          <footer className="page-footer">
-            <span>
-              <Flower2 size={13} />
-              花笺 · 让每一天，轻一点
-            </span>
-            <span>数据保存在这台电脑 · {ready ? "自动保存" : "正在读取"}</span>
-          </footer>
+          {view !== "today" && (
+            <footer className="page-footer">
+              <span>
+                <Flower2 size={13} />
+                花笺 · 让每一天，轻一点
+              </span>
+              <span>
+                数据保存在这台电脑 · {ready ? "自动保存" : "正在读取"}
+              </span>
+            </footer>
+          )}
         </div>
       </main>
       {toast && (
@@ -1504,9 +1622,12 @@ export default function App() {
           key={taskModal === "new" ? "new" : taskModal.id}
           editSeries={setTaskModal}
           task={taskModal}
-          date={view === "calendar" ? selected : today}
+          date={taskDateOverride ?? (view === "calendar" ? selected : today)}
           state={state}
-          close={() => setTaskModal(null)}
+          close={() => {
+            setTaskModal(null);
+            setTaskDateOverride(null);
+          }}
           save={(tasks) => {
             change((s) => {
               const ids = new Set(tasks.map((t) => t.id));
@@ -1516,6 +1637,7 @@ export default function App() {
               };
             });
             setTaskModal(null);
+            setTaskDateOverride(null);
             tell(
               tasks.length > 1
                 ? `已安排 ${tasks.length} 个工作日步骤`
@@ -1535,10 +1657,8 @@ export default function App() {
                 (focusMode === "focus" ? s.focusMinutes : s.breakMinutes) * 60,
               );
           }}
-          importState={(s) => {
-            setState(s);
-            tell("备份已恢复");
-          }}
+          importState={restoreFromBackup}
+          importBusy={importBusy}
           tell={tell}
         />
       )}
@@ -1583,9 +1703,9 @@ function TaskRow({
             </span>
             <span>
               <Clock3 size={11} />
-              {t.time || "全天"}
+              {t.date ? t.time || "全天" : "未排期"}
             </span>
-            <span>{t.date.slice(5)}</span>
+            {t.date && <span title={t.date}>{t.date.slice(5)}</span>}
             {t.estimate > 0 && <span>{t.estimate} 分钟</span>}
             {t.reminder && <Bell size={12} aria-label="已设提醒" />}
             {t.repeat !== "none" && <Repeat2 size={12} aria-label="重复待办" />}
@@ -1646,7 +1766,7 @@ function TaskModal({
 }) {
   const existing = task === "new" ? null : task;
   const [title, setTitle] = useState(existing?.title || "");
-  const [due, setDue] = useState(existing?.date || date);
+  const [due, setDue] = useState(existing?.date ?? date);
   const [time, setTime] = useState(existing?.time || "");
   const [priority, setPriority] = useState<Priority>(
     existing?.priority || "medium",
@@ -1734,7 +1854,7 @@ function TaskModal({
                   id: existing?.id || uid(),
                   title: title.trim(),
                   date: due,
-                  time,
+                  time: due ? time : "",
                   priority,
                   done: existing?.done || false,
                   completedAt: existing?.completedAt,
@@ -1748,9 +1868,9 @@ function TaskModal({
                         ? existing.steps[i]
                         : { id: uid(), title: text, done: false },
                     ),
-                  repeat: existing?.id.includes("::") ? "none" : repeat,
+                  repeat: !due || existing?.id.includes("::") ? "none" : repeat,
                   estimate,
-                  reminder,
+                  reminder: Boolean(due && time && reminder),
                 },
               ]);
             } catch (e) {
@@ -1772,19 +1892,27 @@ function TaskModal({
           </label>
           <div className="form-row">
             <label className="field">
-              安排日期
+              安排日期（可选）
               <input
                 type="date"
-                required
+                required={split}
                 disabled={!!existing?.id.includes("::")}
                 value={due}
-                onChange={(e) => setDue(e.target.value)}
+                onChange={(e) => {
+                  setDue(e.target.value);
+                  if (!e.target.value) {
+                    setTime("");
+                    setReminder(false);
+                    setRepeat("none");
+                  }
+                }}
               />
             </label>
             <label className="field">
               提醒时间
               <input
                 type="time"
+                disabled={!due}
                 value={time}
                 onChange={(e) => {
                   setTime(e.target.value);
@@ -1809,7 +1937,7 @@ function TaskModal({
               重复
               <select
                 value={repeat}
-                disabled={split || !!existing?.id.includes("::")}
+                disabled={!due || split || !!existing?.id.includes("::")}
                 onChange={(e) => setRepeat(e.target.value as Task["repeat"])}
               >
                 <option value="none">不重复</option>
@@ -1858,7 +1986,7 @@ function TaskModal({
               <input
                 type="checkbox"
                 checked={reminder}
-                disabled={!time}
+                disabled={!due || !time}
                 onChange={(e) => setReminder(e.target.checked)}
               />
               到时提醒我
@@ -1905,12 +2033,14 @@ function SettingsModal({
   close,
   save,
   importState,
+  importBusy,
   tell,
 }: {
   state: AppState;
   close: () => void;
   save: (s: AppState["settings"]) => void;
-  importState: (s: AppState) => void;
+  importState: () => Promise<boolean>;
+  importBusy: boolean;
   tell: (s: string) => void;
 }) {
   const [s, setS] = useState({ ...state.settings });
@@ -2077,8 +2207,8 @@ function SettingsModal({
           <div className="settings-group">
             <h3>备份与恢复</h3>
             <p className="subtle">
-              导出包含待办、便签、专注记录和设置，不包含 API
-              Key。导入将替换当前数据。
+              导出待办、便笺和标签、复盘、专注记录与设置。密钥由 Windows
+              单独保存。导入前会保留当前数据副本。
             </p>
             <div className="inline">
               <button
@@ -2099,17 +2229,10 @@ function SettingsModal({
               <button
                 type="button"
                 className="secondary-button"
+                disabled={busy || importBusy}
                 onClick={async () => {
-                  if (
-                    !confirm("导入备份将替换当前数据，建议先导出备份。继续？")
-                  )
-                    return;
                   try {
-                    const data = await window.workbench?.importData();
-                    if (data) {
-                      importState(data);
-                      close();
-                    }
+                    if (await importState()) close();
                   } catch (e) {
                     setErr(String(e));
                   }
@@ -2133,7 +2256,11 @@ function SettingsModal({
             <button type="button" className="secondary-button" onClick={close}>
               取消
             </button>
-            <button type="submit" className="primary-button" disabled={busy}>
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={busy || importBusy}
+            >
               {busy ? "保存中…" : "保存设置"}
             </button>
           </div>

@@ -42,7 +42,7 @@ async function launch() {
   page.on('console', message => {
     if (message.type() === 'error') errors.push(message.text());
   });
-  await page.getByTestId('calendar-view').waitFor({ state: 'visible', timeout: 20000 });
+  await page.getByTestId('week-calendar').waitFor({ state: 'visible', timeout: 20000 });
   measurements.launchMs.push(Math.round(performance.now() - start));
   measurements.version = await page.evaluate(() => window.workbench.version());
 }
@@ -186,10 +186,11 @@ async function testMockAi() {
 async function testFocusCompletion() {
   await page.clock.install();
   await page.reload();
-  await page.getByTestId('calendar-view').waitFor();
+  await page.getByTestId('week-calendar').waitFor();
   await page.getByRole('button', { name: /^偏好设置/ }).click();
   await page.locator('label.field').filter({ hasText: '专注时长' }).locator('input').fill('1');
   await page.getByRole('button', { name: '保存设置', exact: true }).click();
+  await page.locator('.workspace-tools summary').click();
   assert.equal((await page.locator('.timer').textContent()).replace(/\s/g, ''), '01:00', 'idle timer must follow newly saved focus duration');
   await page.getByTestId('focus-start').click();
   await page.clock.runFor(61000);
@@ -203,6 +204,7 @@ async function testFocusCompletion() {
   await page.getByTestId('focus-start').click();
   await page.getByRole('button', { name: '重置计时', exact: true }).click();
   await page.clock.resume();
+  await page.locator('.workspace-tools summary').click();
   measurements.focusRegression = { status: 'PASS', completedSessions: 1, minutes: 1, duplicateSessions: 0 };
 }
 
@@ -264,6 +266,171 @@ async function testBackup() {
   }
 }
 
+function shiftDate(key, days) {
+  const date = new Date(`${key}T12:00:00`);
+  date.setDate(date.getDate() + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+async function openView(name) {
+  await page.getByRole('navigation').getByRole('button', { name }).click();
+}
+
+async function testWorkspaceUpgrade() {
+  const livePath = path.join(dataDir, 'workbench.json');
+  const legacyPath = path.join(evidenceDir, 'legacy-backup.json');
+  const upgradedPath = path.join(evidenceDir, 'current-backup.json');
+  const markdownPath = path.join(evidenceDir, 'weekly-review.md');
+  const currentWeek = (await page.getByTestId('dashboard-week').textContent()).slice(0, 10);
+  const historicalWeek = shiftDate(currentWeek, -14);
+  const historicalEnd = shiftDate(historicalWeek, 6);
+  const historicalTitle = '旧版已完成的归档排期';
+  const historicalReview = '旧版复盘：会议资料已经整理完成。';
+  const legacy = await loadState();
+  legacy.tasks.push({ ...legacy.tasks[0], id: 'legacy-history', title: historicalTitle, date: historicalWeek, time: '', reminder: false, steps: [], done: true, repeat: 'none' });
+  legacy.reviews[historicalWeek] = historicalReview;
+  delete legacy.noteTags;
+  for (const note of legacy.notes) delete note.tagIds;
+  const legacyJson = JSON.stringify(legacy, null, 2);
+  await close();
+  fs.writeFileSync(livePath, legacyJson);
+  fs.writeFileSync(legacyPath, legacyJson);
+  const previousRecoveryCopy = fs.readFileSync(`${livePath}.bak`, 'utf8');
+  await launch();
+  assert.equal((await loadState()).reviews[historicalWeek], historicalReview);
+  assert.deepEqual((await loadState()).notes[0].tagIds, []);
+  assert.equal(fs.readFileSync(livePath, 'utf8'), legacyJson, 'startup should not eagerly rewrite existing data');
+  assert.equal(fs.readFileSync(`${livePath}.bak`, 'utf8'), previousRecoveryCopy, 'startup should not rotate the recovery copy');
+
+  // Import a previous-format backup using the application's normal entry point.
+  await app.evaluate(({ dialog }, filename) => {
+    globalThis.__legacyDialogs = { open: dialog.showOpenDialog, message: dialog.showMessageBox, save: dialog.showSaveDialog };
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filename] });
+    dialog.showMessageBox = async () => ({ response: 1 });
+  }, legacyPath);
+  await page.getByRole('button', { name: /^偏好设置/ }).click();
+  await page.getByRole('button', { name: '导入备份', exact: true }).click();
+  await page.getByTestId('settings-view').waitFor({ state: 'hidden' });
+  assert.ok(fs.readdirSync(path.join(dataDir, 'backups')).some(name => name.startsWith('before-import-')));
+
+  const quick = page.getByRole('textbox', { name: '一句话创建待办' });
+  await quick.fill('明天下午三点开会');
+  await quick.press('Enter');
+  const tomorrowKey = shiftDate(await page.evaluate(() => new Date().toLocaleDateString('sv-SE')), 1);
+  await waitFor(async () => (await loadState()).tasks.some(task => task.title === '开会' && task.date === tomorrowKey && task.time === '15:00'), 'natural language date and time persisted');
+  const taskButton = page.getByTestId('week-calendar').getByRole('button', { name: new RegExp(`${tomorrowKey} 15:00.*开会`) });
+  await taskButton.waitFor();
+  await taskButton.click();
+  assert.equal(await page.getByTestId('task-title-input').inputValue(), '开会');
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  const taskItem = page.getByTestId('task-item').filter({ hasText: '开会' });
+  await taskItem.getByRole('checkbox').first().check();
+  const hasStrike = locator => locator.evaluate(node => getComputedStyle(node).textDecorationLine.includes('line-through'));
+  assert.equal(await hasStrike(taskButton.locator('.wb-week-task-title')), true);
+  assert.equal(await hasStrike(taskItem.locator('.task-title')), true);
+
+  await quick.fill('下周找时间打电话');
+  await quick.press('Enter');
+  assert.match(await page.locator('#quick-task-feedback').textContent(), /明确|具体/);
+  assert.ok(!(await loadState()).tasks.some(task => task.title.includes('打电话')));
+  await quick.fill('核对采购订单');
+  await quick.press('Enter');
+  await waitFor(async () => (await loadState()).tasks.some(task => task.title === '核对采购订单' && !task.date && !task.time), 'undated task persisted');
+  await page.getByTestId('task-item').filter({ hasText: '核对采购订单' }).waitFor();
+  assert.equal(await page.getByTestId('week-calendar').getByText('核对采购订单', { exact: true }).count(), 0);
+  await page.getByRole('button', { name: '本周', exact: true }).click();
+  await page.getByRole('button', { name: '上一周', exact: true }).click();
+  await page.getByRole('button', { name: '上一周', exact: true }).click();
+  await page.getByTestId('week-calendar').getByText(historicalTitle, { exact: true }).waitFor();
+  await page.getByRole('button', { name: '下一周', exact: true }).click();
+  assert.match(await page.getByTestId('dashboard-week').textContent(), new RegExp(shiftDate(currentWeek, -7)));
+  await page.getByRole('button', { name: '本周', exact: true }).click();
+  assert.match(await page.getByTestId('dashboard-week').textContent(), new RegExp(currentWeek));
+
+  await openView('周度复盘');
+  const writing = page.getByRole('textbox', { name: '写给这一周的自己' });
+  await writing.fill('当前周新复盘');
+  await page.getByLabel('历史复盘周').selectOption(historicalWeek);
+  assert.equal(await writing.inputValue(), historicalReview);
+  await app.evaluate(({ dialog }, filename) => {
+    dialog.showSaveDialog = async (_window, options) => {
+      globalThis.__weeklyFilename = options.defaultPath;
+      return { canceled: false, filePath: filename };
+    };
+  }, markdownPath);
+  await page.getByTestId('export-review').click();
+  await waitFor(() => fs.existsSync(markdownPath), 'selected history exported');
+  const markdown = fs.readFileSync(markdownPath, 'utf8');
+  for (const text of [historicalWeek, historicalEnd, historicalTitle, historicalReview, '未完成待办', '累计专注']) assert.ok(markdown.includes(text), text);
+  assert.ok(!markdown.includes('当前周新复盘'));
+  assert.equal(await app.evaluate(() => globalThis.__weeklyFilename), `周总结_${historicalWeek}_至_${historicalEnd}.md`);
+  await page.getByLabel('选择复盘日期').fill(currentWeek);
+  assert.equal(await writing.inputValue(), '当前周新复盘');
+
+  await openView('灵感便签');
+  await page.getByRole('button', { name: '管理标签' }).click();
+  for (const name of ['会议', '复盘']) {
+    await page.getByLabel('标签名称').fill(name);
+    await page.getByRole('button', { name: '新建标签', exact: true }).click();
+  }
+  await page.getByRole('button', { name: '编辑标签 复盘', exact: true }).click();
+  await page.getByLabel('标签名称').fill('周复盘');
+  await page.getByRole('button', { name: '保存标签名称', exact: true }).click();
+  await page.getByRole('button', { name: '关闭标签管理' }).click();
+  const noteTitle = '新便笺：整理投影设备和复盘材料。';
+  await page.getByTestId('note-input').fill(noteTitle);
+  await page.getByRole('checkbox', { name: '会议', exact: true }).check();
+  await page.getByRole('checkbox', { name: '周复盘', exact: true }).check();
+  await page.getByTestId('save-note').click();
+  let note = page.getByTestId('note-card').filter({ hasText: noteTitle });
+  const meetingTag = (await loadState()).noteTags.find(tag => tag.name === '会议').id;
+  await page.getByLabel('按标签筛选').selectOption(meetingTag);
+  assert.equal(await page.getByTestId('note-card').count(), 1);
+  await note.getByRole('button', { name: '归档便笺', exact: true }).click();
+  await note.waitFor({ state: 'hidden' });
+  await page.locator('.notes-toolbar').getByRole('button', { name: /^归档便笺/ }).click();
+  await note.waitFor();
+  await waitFor(async () => Boolean((await loadState()).notes.find(item => item.text === noteTitle)?.archivedAt), 'archived note persisted');
+
+  await app.evaluate(({ dialog }, filename) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: filename }); }, upgradedPath);
+  assert.equal(await page.evaluate(() => window.workbench.exportData()), true);
+  const upgraded = JSON.parse(fs.readFileSync(upgradedPath, 'utf8'));
+  assert.equal(upgraded.schemaVersion, 1);
+  assert.equal(upgraded.noteTags.length, 2);
+  assert.equal(upgraded.notes.find(item => item.text === noteTitle).tagIds.length, 2);
+  assert.ok(upgraded.notes.find(item => item.text === noteTitle).archivedAt);
+  assert.equal(upgraded.reviews[historicalWeek], historicalReview);
+
+  await close();
+  await launch();
+  note = page.getByTestId('note-card').filter({ hasText: noteTitle });
+  const restarted = await loadState();
+  assert.equal(restarted.tasks.find(task => task.id === 'legacy-history').done, true);
+  assert.equal(restarted.reviews[historicalWeek], historicalReview);
+  assert.equal(restarted.reviews[currentWeek], '当前周新复盘');
+  await openView('灵感便签');
+  await note.waitFor({ state: 'hidden' });
+  await page.locator('.notes-toolbar').getByRole('button', { name: /^归档便笺/ }).click();
+  assert.match(await note.textContent(), /会议.*周复盘/);
+  await note.getByRole('button', { name: '恢复便笺' }).click();
+  await page.getByRole('button', { name: '当前便笺', exact: true }).click();
+  await note.waitFor();
+  await page.getByRole('button', { name: '管理标签' }).click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '删除标签 会议', exact: true }).click();
+  await page.getByRole('button', { name: '关闭标签管理' }).click();
+  await waitFor(async () => (await loadState()).notes.find(item => item.text === noteTitle)?.tagIds.length === 1, 'tag removed without removing note');
+  assert.match(await note.textContent(), /周复盘/);
+  assert.equal(await note.getByText('会议', { exact: true }).count(), 0);
+
+  await openView('今日工作台');
+  await page.setViewportSize({ width: 1366, height: 768 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1), true, 'dashboard should fit the desktop viewport');
+  assert.equal(await page.getByTestId('week-calendar').locator('.wb-week-column').count(), 7);
+  await page.screenshot({ path: path.join(evidenceDir, 'workbench-1366x768.png') });
+  measurements.workspaceUpgrade = { status: 'PASS', legacyStartupUnchanged: true, legacyImport: true, naturalTask: true, historicalMarkdown: true, tagsArchiveRestart: true, desktopViewport: '1366x768' };
+}
+
 async function main() {
   await launch();
   assert.equal(measurements.version, require('../package.json').version);
@@ -298,6 +465,7 @@ async function main() {
   await page.getByTestId('save-note').click();
   await waitFor(async () => (await loadState())?.notes.some(note => note.text === '下次会议提前十分钟检查投影。'), 'note saved from UI');
 
+  await page.locator('.workspace-tools summary').click();
   await page.getByTestId('focus-start').click();
   await page.getByTestId('focus-start').filter({ hasText: '暂停' }).waitFor({ state: 'visible' });
   await page.getByTestId('focus-start').click();
@@ -395,6 +563,8 @@ async function main() {
   await launch();
   assert.equal((await loadState()).tasks.length, 3);
 
+  await testWorkspaceUpgrade();
+
   assert.deepEqual(errors, [], 'renderer must not emit runtime errors');
   const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
   measurements.summary = {
@@ -402,9 +572,9 @@ async function main() {
     launchWorstMs: Math.max(...measurements.launchMs),
     taskMedianMs: median(measurements.taskInteractionMs),
     taskWorstMs: Math.max(...measurements.taskInteractionMs),
-    baseline: 'Initial release; no prior-release comparison is available',
+    baseline: 'Test timings depend on the current Windows runner and window size',
     budgetMs: 3000,
-    samples: 3,
+    samples: measurements.launchMs.length,
   };
   // Desktop boot includes process startup. The deterministic task interaction is the release gate.
   assert.ok(measurements.summary.taskWorstMs < 3000, 'task interaction exceeds the 3-second budget');

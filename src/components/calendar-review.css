@@ -1,0 +1,48 @@
+.card.wb-week-calendar { display: flex; flex-direction: column; min-height: 0; padding: 18px 0 0; overflow: hidden; }
+.wb-week-heading { padding: 0 22px; gap: 16px; flex-wrap: wrap; }
+.wb-week-heading h2 { display: flex; align-items: center; gap: 8px; }
+.wb-week-heading > span { color: var(--muted, #766772); font-size: 12px; }
+.wb-week-scroll { flex: 1; min-height: 0; overflow: auto; outline-offset: -3px; }
+.wb-week-scroll:focus-visible { outline: 2px solid var(--accent, #a84f76); }
+.wb-week-grid { display: grid; grid-template-columns: repeat(7, minmax(68px, 1fr)); min-width: 476px; min-height: 100%; border-top: 1px solid #eee4eb; }
+.wb-week-column { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid #eee4eb; }
+.wb-week-column:last-child { border-right: 0; }
+.wb-week-today { background: #fff7fa; }
+.wb-week-day-heading { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; width: 100%; min-height: 104px; padding: 12px 7px 10px; border: 0; border-bottom: 1px solid #eee4eb; border-radius: 0; background: #fff; text-align: left; color: inherit; font: inherit; }
+.wb-week-today .wb-week-day-heading { background: #fff7fa; }
+button.wb-week-day-heading { cursor: pointer; }
+button.wb-week-day-heading:hover { background: #f9eef4; }
+.wb-week-day-heading .work-badge { position: static; font-size: 9px; padding: 0 2px; flex-shrink: 0; }
+.wb-weekday-name { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; font-size: 11px; color: #74636e; }
+.wb-weekday-name b { font-size: 10px; font-weight: 500; color: #98476a; background: #f5dfeb; border-radius: 4px; padding: 1px 4px; }
+.wb-weekday-date { font-size: 17px; font-weight: 600; letter-spacing: -0.5px; white-space: nowrap; }
+.wb-weekday-date small { font-size: 11px; margin: 0 2px; font-weight: 400; color: #7e6d78; }
+.wb-weekday-lunar { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #766772; }
+.wb-weekday-add { position: absolute; top: 17px; right: 10px; color: #9d6d83; }
+.wb-week-task-list { display: flex; flex-direction: column; gap: 7px; padding: 9px 5px; flex: 1; min-height: 100px; }
+.wb-week-task { display: block; width: 100%; min-width: 0; border: 1px solid #eadfe8; border-left: 3px solid #bea5cf; border-radius: 7px; padding: 8px 5px; background: #fff; text-align: left; font: inherit; color: #4b3b47; cursor: pointer; }
+.wb-week-task:hover { border-color: #b9809b; box-shadow: 0 3px 10px #8d5b7510; }
+.wb-week-task:focus-visible, .wb-week-day-heading:focus-visible, .wb-week-day-empty button:focus-visible { outline: 2px solid #a84f76; outline-offset: 2px; }
+.wb-week-priority-high { border-left-color: #c46885; }
+.wb-week-priority-low { border-left-color: #7f9a8a; }
+.wb-week-task-time { display: flex; justify-content: space-between; align-items: center; color: #806b79; font-size: 10px; margin-bottom: 5px; }
+.wb-week-task-title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; line-height: 1.6; font-weight: 500; }
+.wb-week-task-status { display: block; font-size: 10px; margin-top: 5px; color: #826b7a; }
+.wb-week-task-done { background: #f5f3f4; border-left-color: #a9aca5; }
+.wb-week-task-done .wb-week-task-title { text-decoration: line-through; color: #7d767c; }
+.wb-week-day-empty { padding: 26px 0; text-align: center; font-size: 11px; color: #8b7a85; }
+.wb-week-day-empty button { display: flex; justify-content: center; align-items: center; gap: 3px; margin: 8px auto 0; border: 0; background: transparent; font: inherit; color: #9e5275; cursor: pointer; }
+.wb-week-day-total { border-top: 1px dashed #e9dfe5; margin: 0 8px; padding: 10px 0 12px; text-align: center; font-size: 10px; color: #86747e; }
+.wb-week-foot { padding: 14px 22px; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.wb-week-calendar > .notice { margin: 0 18px 16px; }
+.card.wb-review-tools { width: 100%; flex-basis: 100%; margin: 0; }
+.wb-review-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 16px; }
+.wb-review-date-label, .wb-review-history-label { display: flex; flex-direction: column; gap: 8px; min-width: 175px; font-size: 12px; color: #66535f; flex: 1; }
+.wb-review-date-label > span, .wb-review-history-label > span { display: flex; gap: 6px; align-items: center; }
+.wb-review-date-label input, .wb-review-history-label select { width: 100%; min-width: 0; padding: 9px 11px; min-height: 39px; border: 1px solid #e5dbe2; border-radius: 8px; font: inherit; background: #fff; color: #594652; }
+.wb-review-date-label input:focus-visible, .wb-review-history-label select:focus-visible { outline: 2px solid #a84f76; outline-offset: 2px; }
+.wb-review-export { min-height: 39px; white-space: nowrap; }
+.wb-review-preview { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 16px; margin: 18px 0 0; padding-top: 14px; border-top: 1px solid #eee4eb; color: #786371; font-size: 12px; line-height: 1.7; }
+.wb-review-preview b { color: #624653; font-weight: 500; }
+.wb-review-preview small { flex-basis: 100%; font-size: 11px; }
+@media (max-width: 700px) { .wb-week-heading { padding: 0 16px; } .wb-week-foot { padding: 12px 16px; } .wb-review-controls { gap: 12px; } .wb-review-export { width: 100%; justify-content: center; } }

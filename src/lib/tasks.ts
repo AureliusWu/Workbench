@@ -8,12 +8,15 @@ function splitOccurrence(id:string):{templateId:string;date?:string} {
 }
 export function taskTemplateId(id:string):string { return splitOccurrence(id).templateId; }
 function isScheduled(task:Task,date:string):boolean {
+  if (!task.date) return false;
   if (date<task.date) return false;
   if (task.repeat==='none') return task.date===date;
   return task.repeat==='daily' || parseDate(task.date).getDay()===parseDate(date).getDay();
 }
 /** Earliest occurrence on/after a local date; a past non-recurring task has no next occurrence. */
 export function nextOccurrenceDate(task:Task,fromDate:string):string|null {
+  parseDate(fromDate);
+  if (!task.date) return null;
   const start=parseDate(task.date),from=parseDate(fromDate);
   if (task.date>=fromDate) return task.date;
   if (task.repeat==='none') return null;

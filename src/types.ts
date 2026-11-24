@@ -23,6 +23,12 @@ export interface Note {
   text: string;
   color: "pink" | "lavender" | "mint" | "yellow";
   createdAt: string;
+  tagIds: string[];
+  archivedAt?: string;
+}
+export interface NoteTag {
+  id: string;
+  name: string;
 }
 export interface FocusSession {
   id: string;
@@ -45,6 +51,7 @@ export interface AppState {
   schemaVersion: 1;
   tasks: Task[];
   notes: Note[];
+  noteTags: NoteTag[];
   focusSessions: FocusSession[];
   reviews: Record<string, string>;
   settings: Settings;
@@ -64,6 +71,11 @@ export interface DesktopApi {
   pinClipboard: () => Promise<void>;
   pinNote: (text: string) => Promise<void>;
   exportData: () => Promise<boolean>;
+  exportReview: (payload: {
+    weekStart: string;
+    weekEnd: string;
+    markdown: string;
+  }) => Promise<boolean>;
   importData: () => Promise<AppState | null>;
   selectFolder: () => Promise<string | null>;
   listFiles: (path: string) => Promise<FileEntry[]>;

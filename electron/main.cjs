@@ -3,7 +3,7 @@ const {Blob}=require('node:buffer');
 const fs=require('node:fs');
 const fsp=require('node:fs/promises');
 const path=require('node:path');
-const {validateState,readState,writeState,localDate,occursOn,reminderKey,normalizeAiEndpoint,normalizeApiKey,MAX_BYTES}=require('./state.cjs');
+const {validateState,readState,writeState,localDate,occursOn,reminderKey,normalizeAiEndpoint,normalizeApiKey,validateReviewExport,exportTarget,backupBeforeImport,MAX_BYTES}=require('./state.cjs');
 app.setName('Workbench');
 if (process.env.WORKBENCH_DATA_DIR) {
   const isolated=path.resolve(process.env.WORKBENCH_DATA_DIR);
@@ -85,14 +85,16 @@ function persistLedger() {
 }
 function notificationOnce(id,title,body) { if(reminderLedger[id])return;reminderLedger[id]=Date.now();persistLedger();notify(title,body); }
 function checkReminders() {
-  if(!state)return;
+  if(!state&&storeError)return;
   const now=new Date(),today=localDate(now),minute=now.getHours()*60+now.getMinutes();
   // The durable ledger avoids repeat alerts after app restarts.
   for(const [key,time]of Object.entries(reminderLedger))if(Number(time)<Date.now()-35*86400000)delete reminderLedger[key];
-  if(state.settings.morningGreeting&&now.getHours()>=6&&now.getHours()<12)notificationOnce(`greeting:${today}`,`早安，${state.settings.name||'新的一天'}`,`今天也慢慢来，把重要的小事放进花笺。`);
+  const settings=state?.settings||{morningGreeting:true,name:''};
+  if(settings.morningGreeting&&now.getHours()>=6&&now.getHours()<12)notificationOnce(`greeting:${today}`,`早安，${settings.name||'新的一天'}`,`今天也慢慢来，把重要的小事放进花笺。`);
+  if(!state)return;
   const overrideIds=new Set(state.tasks.filter(t=>t.repeat==='none').map(t=>t.id));
   for(const task of state.tasks) {
-    if(!task.reminder||!task.time||task.done||!occursOn(task,today))continue;
+    if(!task.date||!task.reminder||!task.time||task.done||!occursOn(task,today))continue;
     if(task.repeat!=='none'&&overrideIds.has(`${task.id}::${today}`))continue;
     const [hour,min]=task.time.split(':').map(Number),due=hour*60+min;
     // Catch reminders missed while the running computer slept earlier today.
@@ -104,17 +106,26 @@ async function exportData() {
   if(!state)throw new Error('还没有可导出的本地数据。');
   const result=await dialog.showSaveDialog(mainWindow,{title:'导出花笺备份',defaultPath:`Workbench-备份-${localDate()}.json`,filters:[{name:'JSON 备份',extensions:['json']}]});
   if(result.canceled||!result.filePath)return false;
-  const target=path.resolve(result.filePath),reserved=[dataFile(),`${dataFile()}.bak`,`${dataFile()}.tmp`,keyFile(),ledgerFile()];
-  if(reserved.some(p=>path.resolve(p).toLowerCase()===target.toLowerCase()))throw new Error('请选择其他位置，不能覆盖正在使用的数据文件。');
+  const target=exportTarget(result.filePath,app.getPath('userData'),[dataFile(),`${dataFile()}.bak`,`${dataFile()}.tmp`,keyFile(),`${keyFile()}.tmp`,ledgerFile(),`${ledgerFile()}.tmp`]);
   await fsp.writeFile(target,JSON.stringify(validateState(state),null,2),'utf8');return true;
+}
+async function exportReview(payload) {
+  const review=validateReviewExport(payload);
+  const result=await dialog.showSaveDialog(mainWindow,{title:'导出周总结 Markdown',defaultPath:`周总结_${review.weekStart}_至_${review.weekEnd}.md`,filters:[{name:'Markdown 文档',extensions:['md']}]});
+  if(result.canceled||!result.filePath)return false;
+  const filename=path.extname(result.filePath)?result.filePath:`${result.filePath}.md`;
+  if(path.extname(filename).toLowerCase()!=='.md')throw new Error('请将周总结保存为 .md 文件。');
+  const target=exportTarget(filename,app.getPath('userData'),[dataFile(),`${dataFile()}.bak`,`${dataFile()}.tmp`,keyFile(),`${keyFile()}.tmp`,ledgerFile(),`${ledgerFile()}.tmp`]);
+  await fsp.writeFile(target,review.markdown,'utf8');return true;
 }
 async function importData() {
   const result=await dialog.showOpenDialog(mainWindow,{title:'导入花笺备份',properties:['openFile'],filters:[{name:'JSON 备份',extensions:['json']}]});
   if(result.canceled||!result.filePaths[0])return null;
   const filename=result.filePaths[0];if((await fsp.stat(filename)).size>MAX_BYTES)throw new Error('备份文件超过 20 MB。');
   const imported=validateState(JSON.parse(await fsp.readFile(filename,'utf8')));
-  const answer=await dialog.showMessageBox(mainWindow,{type:'question',title:'导入备份',message:`替换当前的 ${state?.tasks.length||0} 条待办和 ${state?.notes.length||0} 条便签？`,detail:'当前数据会保留在本机 .bak 恢复文件中。API 密钥不包含在备份中。',buttons:['取消','导入并替换'],defaultId:0,cancelId:0});
+  const answer=await dialog.showMessageBox(mainWindow,{type:'question',title:'导入备份',message:`替换当前的 ${state?.tasks.length||0} 条待办和 ${state?.notes.length||0} 条便签？`,detail:'当前数据会另存为数据目录 backups 中的导入前备份。API 密钥不包含在备份中。',buttons:['取消','导入并替换'],defaultId:0,cancelId:0});
   if(answer.response!==1)return null;
+  backupBeforeImport(dataFile(),state);
   saveState(imported,true);return state;
 }
 async function canonicalAllowed(input) {
@@ -233,7 +244,7 @@ async function capture() {
 }
 function installIpc() {
   handle('state:load',()=>{if(storeError)throw new Error(storeError);return state;});
-  handle('state:save',input=>saveState(input));handle('state:export',exportData);handle('state:import',importData);
+  handle('state:save',input=>saveState(input));handle('state:export',exportData);handle('state:import',importData);handle('review:export',exportReview);
   handle('notify',notify);handle('capture',capture);handle('pin:clipboard',pinClipboard);handle('pin:note',pinNote);
   handle('files:select',selectFolder);handle('files:list',listFiles);handle('files:open',async input=>{const target=await canonicalAllowed(input);const result=await shell.openPath(target);if(result)throw new Error(result);});
   handle('window:action',action=>{

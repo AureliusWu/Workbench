@@ -4,11 +4,15 @@
 
 **Windows 10 / 11，64 位。数据保存在本机。**
 
-1.0.1 提供可滚动的侧栏，小窗口中也能打开设置并切换功能；1.0.0 保留为发行候选记录。
+1.1.0 提供 Windows 一键安装版；后续运行新版安装程序即可覆盖已安装的旧程序，继续使用原来的本机记录。
 
 ## 下载与运行
 
-到 [Releases](https://github.com/AureliusWu/Workbench/releases) 下载 `Workbench-版本号-win-x64.exe`，双击运行，无需安装 Node.js 或浏览器。便携程序启动时需要解压运行环境，本机验证约需 9 秒，请耐心等待片刻。
+到 [Releases](https://github.com/AureliusWu/Workbench/releases) 下载 `Workbench-Setup-1.1.0-win-x64.exe`，双击后自动安装并打开工作台，无需安装 Node.js 或浏览器。安装在当前 Windows 用户下，默认程序位置为 `%LOCALAPPDATA%\Programs\Workbench`，创建“花笺 Workbench”桌面及开始菜单快捷方式。
+
+以后下载新版 `Workbench-Setup-版本号-win-x64.exe` 再次打开，安装程序会识别同一份已安装程序并更新。任务、便笺、复盘、设置与本机加密密钥保存在独立数据目录，安装和正常卸载均保留这些记录。更新前可以先在设置中导出一份备份。
+
+如果此前使用 1.0.1 便携 EXE，首次安装会继续读取同一份 `%APPDATA%\Workbench` 数据。旧便携 EXE 可能放在任意文件夹，安装程序不会删除或改写该文件；以后请使用新的“花笺 Workbench”快捷方式打开。升级前从托盘退出旧程序，避免继续运行旧便携文件。
 
 发行版尚未购买代码签名证书，Windows 可能显示发布者未验证。请只从本仓库发行页下载，并用发行页中的 SHA-256 校验值确认文件来源。
 
@@ -46,7 +50,7 @@
 
 ## 数据与迁移
 
-数据保存在 Windows 当前用户的 `%APPDATA%\Workbench\workbench.json`，运行文件所在位置与数据位置分离。移动或更新 EXE 不会主动清除记录。
+数据保存在 Windows 当前用户的 `%APPDATA%\Workbench\workbench.json`，运行文件所在位置与数据位置分离。覆盖安装新版本不会清除此目录；Windows 正常卸载也保留记录，重新安装后可继续使用。
 
 建议定期在设置中“导出备份”，将 JSON 保存到你选择的位置；换电脑后运行 Workbench 并“导入备份”。导入会替换工作台当前数据，请先导出已有内容。API Key 需要在新电脑重新填写。
 
@@ -81,7 +85,11 @@ npm run test:e2e
 npm run dist
 ```
 
-`release/` 包含便携 EXE。端到端测试使用独立临时数据目录，不修改日常记录。运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-icon.ps1` 可重新生成图标。
+`release/` 包含 `Workbench-Setup-版本号-win-x64.exe` 一键安装程序。需要额外制作便携包时可运行 `npm run dist:portable`，产出 `Workbench-Portable-版本号-win-x64.exe`。
+
+端到端测试使用独立临时数据目录，不修改日常记录。`npm run test:installer` 仅允许在 GitHub 托管的临时 Windows 测试账户中执行，验证真实安装、覆盖升级、旧数据及密钥保留和卸载；在日常本机运行会拒绝修改安装注册表。可通过 `WORKBENCH_INSTALLER` 或 `-InstallerPath` 指定待测安装包，详见 [安装与升级约定](docs/INSTALLER.md)。
+
+运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-icon.ps1` 可重新生成图标。
 
 ## 许可
 

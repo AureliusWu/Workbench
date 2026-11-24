@@ -5,7 +5,7 @@ import { deleteTask,dueReminders,nextOccurrenceDate,planTask,tasksForDate,toggle
 
 const settings:Settings={name:'朋友',lastSaturdayWork:true,dayOverrides:{},focusMinutes:25,breakMinutes:5,morningGreeting:true,autoLaunch:false,aiEndpoint:'',aiModel:''};
 const makeTask=(patch:Partial<Task>={}):Task=>({id:'t1',title:'整理会议纪要',date:'2026-11-23',time:'09:00',priority:'medium',done:false,createdAt:'2026-11-23T01:00:00Z',steps:[{id:'s1',title:'确认结论',done:false}],repeat:'none',estimate:25,reminder:true,...patch});
-const makeState=(tasks:Task[]):AppState=>({schemaVersion:1,tasks,notes:[],focusSessions:[],reviews:{},settings});
+const makeState=(tasks:Task[]):AppState=>({schemaVersion:1,tasks,notes:[],noteTags:[],focusSessions:[],reviews:{},settings});
 
 describe('civil calendar dates',()=>{
   it('uses local date components and crosses year/leap boundaries without UTC shifts',()=>{
@@ -73,6 +73,12 @@ describe('workday precedence and official holiday coverage',()=>{
 });
 
 describe('repeat task occurrence isolation',()=>{
+  it('keeps an undated item out of calendar projections and next-occurrence calculations',()=>{
+    const task=makeTask({date:'',time:'',reminder:false});
+    expect(tasksForDate([task],'2026-11-24')).toEqual([]);
+    expect(nextOccurrenceDate(task,'2026-11-24')).toBeNull();
+    expect(weeklyStats(makeState([task]),'2026-11-24').total).toBe(0);
+  });
   it('finds a weekly next occurrence on a non-occurrence date instead of hiding the series',()=>{
     const task=makeTask({repeat:'weekly'});
     const next=nextOccurrenceDate(task,'2026-11-24');
