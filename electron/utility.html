@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'"><meta name="viewport" content="width=device-width,initial-scale=1"><title>花笺桌面贴图</title><link rel="stylesheet" href="utility.css"></head><body>
+<div id="capture"><img id="screen" alt="当前屏幕"><div id="shade"></div><div id="selection"></div><div id="hint">拖动选择区域，松开后复制并贴到桌面 · Esc 取消</div></div>
+<div id="pin"><header><span id="title">桌面贴图</span><div><button id="smaller" title="缩小">−</button><button id="larger" title="放大">＋</button><button id="copy" title="复制图片">复制</button><label title="透明度"><input id="opacity" type="range" min="25" max="100" value="100" aria-label="透明度"></label><button id="close" title="关闭贴图">×</button></div></header><main id="content"><img id="image" alt="桌面参考图"><pre id="note"></pre></main><footer>拖动顶部移动 · Ctrl+滚轮缩放 · Esc 关闭</footer></div>
+<section id="notification" role="alert"><header><span>❀ 花笺提醒</span><button id="dismiss-notification" aria-label="关闭提醒">×</button></header><div><strong id="notification-title"></strong><p id="notification-body"></p><button id="open-workbench">打开工作台 →</button></div></section>
+<script src="utility.js"></script></body></html>

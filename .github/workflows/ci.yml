@@ -1,0 +1,54 @@
+name: Windows quality and portable build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: node --test scripts/native-test.cjs
+      - run: npm run test:e2e
+        env:
+          WORKBENCH_E2E_CAPTURE: '0'
+      - run: npx electron-builder --win portable --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Generate SHA-256 checksum
+        shell: pwsh
+        run: |
+          $artifactFiles = Get-ChildItem -LiteralPath release -Filter '*.exe'
+          $checksumLines = $artifactFiles | ForEach-Object {
+            $fileHash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+            "$($fileHash.Hash.ToLower())  $($_.Name)"
+          }
+          Set-Content -LiteralPath release/SHA256SUMS.txt -Value $checksumLines -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Workbench-windows-x64
+          path: |
+            release/*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Workbench-smoke-evidence
+          path: artifacts/
+          if-no-files-found: ignore
