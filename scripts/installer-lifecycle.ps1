@@ -61,11 +61,23 @@ function Run-Installer([string] $File, [string] $Arguments) {
   $process = Start-Process -FilePath $File -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
   if ($process.ExitCode -ne 0) { throw "Installer process returned $($process.ExitCode): $File" }
 }
+function Get-Sha256([string] $Filename) {
+  $stream = $null
+  $algorithm = $null
+  try {
+    $stream = [System.IO.File]::OpenRead($Filename)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    return [System.BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+  } finally {
+    if ($algorithm) { $algorithm.Dispose() }
+    if ($stream) { $stream.Dispose() }
+  }
+}
 function Get-ProtectedHashes {
   $hashes = [ordered]@{}
   foreach ($name in $criticalNames) {
     $filename = Join-Path $profilePath $name
-    if (Test-Path -LiteralPath $filename -PathType Leaf) { $hashes[$name] = (Get-FileHash -LiteralPath $filename -Algorithm SHA256).Hash }
+    if (Test-Path -LiteralPath $filename -PathType Leaf) { $hashes[$name] = Get-Sha256 $filename }
   }
   return $hashes
 }
@@ -120,13 +132,13 @@ try {
   $report.seed = Invoke-InstalledProfile 'seed' $BaselineVersion
   $beforeUpgrade = Get-ProtectedHashes
   if (!$beforeUpgrade.Contains('workbench.json') -or !$beforeUpgrade.Contains('ai-key.bin')) { throw 'Seeded records or encrypted key missing.' }
-  $oldProgramHash = (Get-FileHash -LiteralPath (Join-Path $installPath 'resources\app.asar') -Algorithm SHA256).Hash
+  $oldProgramHash = Get-Sha256 (Join-Path $installPath 'resources\app.asar')
   Set-Content -LiteralPath (Join-Path $installPath 'old-program-sentinel.txt') -Value 'The replacement install must remove this old program file.'
   # No /D here: the real stable identity must discover and replace its registered install path.
   Run-Installer $InstallerPath '/S'
   $report.upgradeRegistration = @(Assert-OwnInstallation $version)
   if (Test-Path -LiteralPath (Join-Path $installPath 'old-program-sentinel.txt')) { throw 'Upgrade left the old program sentinel in place.' }
-  if ((Get-FileHash -LiteralPath (Join-Path $installPath 'resources\app.asar') -Algorithm SHA256).Hash -eq $oldProgramHash) { throw 'Upgrade did not replace the old application package.' }
+  if ((Get-Sha256 (Join-Path $installPath 'resources\app.asar')) -eq $oldProgramHash) { throw 'Upgrade did not replace the old application package.' }
   Assert-SameHashes $beforeUpgrade (Get-ProtectedHashes) 'Installer upgrade'
   $report.verify = Invoke-InstalledProfile 'verify' $version
   $beforeUninstall = Get-ProtectedHashes
