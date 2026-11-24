@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import type { AppState, Task, Note, Priority, FileEntry } from "./types";
 import { loadState, saveState, newState, uid, localDate } from "./state";
+import { version as appVersion } from "../package.json";
 import {
   getDayInfo,
   monthCells,
@@ -616,7 +617,7 @@ export default function App() {
             onClick={() => setSettingsOpen(true)}
           >
             <Settings2 size={17} />
-            偏好设置<span>v1.0.0</span>
+            偏好设置<span>v{appVersion}</span>
           </button>
         </div>
       </aside>

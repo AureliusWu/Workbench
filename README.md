@@ -4,6 +4,8 @@
 
 **Windows 10 / 11，64 位。数据保存在本机。**
 
+1.0.1 提供可滚动的侧栏，小窗口中也能打开设置并切换功能；1.0.0 保留为发行候选记录。
+
 ## 下载与运行
 
 到 [Releases](https://github.com/AureliusWu/Workbench/releases) 下载 `Workbench-版本号-win-x64.exe`，双击运行，无需安装 Node.js 或浏览器。便携程序启动时需要解压运行环境，本机验证约需 9 秒，请耐心等待片刻。

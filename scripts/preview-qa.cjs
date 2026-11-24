@@ -45,8 +45,16 @@ async function main() {
   await page.screenshot({ path: path.join(output, 'minimum-window.png'), fullPage: true });
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   if (overflow) throw new Error('Horizontal overflow at minimum native window size');
+  await page.setViewportSize({ width: 1000, height: 600 });
+  await page.getByRole('button', { name: /^偏好设置/ }).click();
+  await page.getByTestId('settings-view').waitFor({ state: 'visible' });
+  await page.screenshot({ path: path.join(output, 'short-screen-settings.png') });
+  await page.getByTestId('settings-view').getByRole('button', { name: '关闭', exact: true }).click();
+  await page.getByRole('button', { name: '日历日程', exact: true }).click();
+  await page.getByRole('button', { name: '今日工作台', exact: true }).click();
+  await page.screenshot({ path: path.join(output, 'short-screen-navigation.png') });
   if (errors.length) throw new Error(errors.join('\n'));
-  console.log(JSON.stringify({ status: 'PASS', output, errors, note: 'Browser frontend preview only; native acceptance remains separate.' }));
+  console.log(JSON.stringify({ status: 'PASS', output, errors, shortScreenSettingsAndNavigation: true, note: 'Browser frontend preview only; native acceptance remains separate.' }));
 }
 main().catch(error => { console.error(error.stack); process.exitCode = 1; }).finally(async () => {
   if (browser) await browser.close();

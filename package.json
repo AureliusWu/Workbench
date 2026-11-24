@@ -1,7 +1,7 @@
 {
   "name": "workbench",
   "productName": "花笺 Workbench",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "本地优先的 Windows 个人与办公工作台",
   "author": "AureliusWu",
   "license": "MIT",

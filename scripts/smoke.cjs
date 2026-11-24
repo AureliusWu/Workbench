@@ -56,6 +56,23 @@ async function loadState() {
   return page.evaluate(() => window.workbench.load());
 }
 
+async function testShortScreen() {
+  const original = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  await page.setViewportSize({ width: 1000, height: 600 });
+  await page.getByRole('button', { name: /^偏好设置/ }).click();
+  const settings = page.getByTestId('settings-view');
+  await settings.waitFor({ state: 'visible' });
+  await page.screenshot({ path: path.join(evidenceDir, 'short-screen-settings.png') });
+  await settings.getByRole('button', { name: '关闭', exact: true }).click();
+  await page.getByRole('button', { name: '日历日程', exact: true }).click();
+  await page.getByRole('button', { name: '今日工作台', exact: true }).click();
+  await page.screenshot({ path: path.join(evidenceDir, 'short-screen-navigation.png') });
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+  assert.equal(overflow, false, 'short screen must not introduce horizontal overflow');
+  await page.setViewportSize(original);
+  measurements.shortScreen = { status: 'PASS', viewport: { width: 1000, height: 600 }, settingsOpenedWithNormalClick: true, navigationReachable: true };
+}
+
 async function selectCalendarDate(key) {
   await page.getByRole('button', { name: '日历日程', exact: true }).click();
   const calendar = page.getByTestId('calendar-view');
@@ -252,6 +269,7 @@ async function main() {
   assert.equal(measurements.version, require('../package.json').version);
   const initial = await loadState();
   assert.ok(!initial || initial.tasks.length === 0, 'fresh profile must not have invented tasks');
+  await testShortScreen();
 
   const titles = ['准备办公物资清单', '核对会议室预约', '整理本周报销材料'];
   for (const title of titles) {
