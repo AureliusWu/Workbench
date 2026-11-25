@@ -83,8 +83,9 @@ async function main() {
   // Stop the production scheduler before injecting fixture dependencies into a separate controller.
   await page.evaluate(() => window.workbench.setAutomaticUpdates(false));
   await app.evaluate(async ({ app, BrowserWindow, ipcMain, net }, fixture) => {
-    const nodePath = require('node:path');
-    const updater = require(nodePath.join(app.getAppPath(), 'electron', 'updater.cjs'));
+    const nodePath = process.getBuiltinModule('path');
+    const requireFromApp = process.getBuiltinModule('module').createRequire(nodePath.join(app.getAppPath(), 'package.json'));
+    const updater = requireFromApp('./electron/updater.cjs');
     const mainWindow = BrowserWindow.getAllWindows().find(window => window.webContents.getURL().includes('index.html'));
     if (!mainWindow) throw new Error('Main workbench window missing.');
     const eligibility = await updater.detectInstalled({ isPackaged: app.isPackaged });

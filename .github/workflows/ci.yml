@@ -59,6 +59,7 @@ jobs:
           name: Workbench-smoke-evidence
           path: |
             artifacts/**/results.json
+            artifacts/**/updater-results.json
             artifacts/**/*.png
             artifacts/**/process.log
           if-no-files-found: ignore
