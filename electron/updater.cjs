@@ -52,24 +52,25 @@ async function request(url,kind,manifest,{fetchImpl=fetch,signal}={}){
 }
 function createElectronFetch(net){
   return (url,options={})=>new Promise((resolve,reject)=>{
-    let settled=false,client;
+    let settled=false,client,incoming;
     const fail=error=>{if(!settled){settled=true;reject(error);}};
-    const abort=()=>{const error=new Error('更新请求已取消。');error.name='AbortError';fail(error);client?.abort();};
+    const cleanup=()=>options.signal?.removeEventListener('abort',abort);
+    const abort=()=>{const error=new Error('更新请求已取消。');error.name='AbortError';fail(error);incoming?.destroy(error);client?.abort();cleanup();};
     if(options.signal?.aborted){abort();return;}
     try{
       client=net.request({url,method:'GET',redirect:'manual',credentials:'omit',useSessionCookies:false});
       for(const [name,value]of Object.entries(options.headers||{}))client.setHeader(name,value);
       options.signal?.addEventListener('abort',abort,{once:true});
-      client.once('close',()=>options.signal?.removeEventListener('abort',abort));
-      client.on('error',fail);
+      client.once('abort',cleanup);
+      client.on('error',error=>{fail(error);cleanup();});
       client.on('redirect',(status,_method,location,rawHeaders)=>{
         if(settled)return;const headers=new Headers();for(const [name,values]of Object.entries(rawHeaders||{}))for(const value of Array.isArray(values)?values:[values])headers.append(name,String(value));headers.set('location',location);
         // Expose the first hop, then cancel it. The outer request() validates the next URL before another request.
         settled=true;resolve(new Response(null,{status,headers}));client.abort();
       });
       client.once('response',response=>{
-        if(settled){client.abort();return;}const headers=new Headers();for(const [name,values]of Object.entries(response.headers||{}))for(const value of Array.isArray(values)?values:[values])headers.append(name,String(value));
-        let ended=false;response.once('end',()=>{ended=true;});response.once('close',()=>{if(!ended)client.abort();});
+        if(settled){client.abort();return;}incoming=response;const headers=new Headers();for(const [name,values]of Object.entries(response.headers||{}))for(const value of Array.isArray(values)?values:[values])headers.append(name,String(value));
+        let ended=false;response.once('end',()=>{ended=true;cleanup();});response.once('close',()=>{if(!ended)client.abort();cleanup();});
         try{const body=Readable.toWeb(response);settled=true;resolve(new Response(body,{status:response.statusCode,headers}));}catch(error){fail(error);client.abort();}
       });
       client.end();

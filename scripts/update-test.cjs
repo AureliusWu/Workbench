@@ -6,6 +6,7 @@ const fsp=require('node:fs/promises');
 const os=require('node:os');
 const path=require('node:path');
 const {EventEmitter}=require('node:events');
+const {Readable}=require('node:stream');
 const updater=require('../electron/updater.cjs');
 const pair=crypto.generateKeyPairSync('ed25519');
 const publicKey=pair.publicKey.export({type:'spki',format:'pem'});
@@ -82,4 +83,16 @@ test('installer handoff waits for parent exit, hashes via .NET, and never kills 
 });
 test('a helper spawn failure rejects without asking the app to exit',async()=>{
   const directory=folder();try{await assert.rejects(updater.launchInstaller({installer:path.join(directory,'fixture.exe'),manifest:manifest(),cacheDirectory:directory,spawnImpl:()=>{const child=new EventEmitter();process.nextTick(()=>child.emit('error',new Error('spawn denied')));return child;}}),/继续运行/);}finally{clean(directory);}
+});
+test('Electron adapter preserves AbortSignal across an early outgoing close event',async()=>{
+  let aborted=false;const net={request:()=>{const client=new EventEmitter();client.setHeader=()=>{};client.end=()=>process.nextTick(()=>client.emit('close'));client.abort=()=>{aborted=true;client.emit('abort');};return client;}};
+  const controller=new AbortController(),pending=updater.createElectronFetch(net)('https://github.com/fixture',{signal:controller.signal});await new Promise(resolve=>setImmediate(resolve));controller.abort();await assert.rejects(pending,error=>error.name==='AbortError');assert.equal(aborted,true);
+});
+test('Electron adapter exposes a redirect without following an unvalidated destination',async()=>{
+  let aborted=false;const net={request:()=>{const client=new EventEmitter();client.setHeader=()=>{};client.end=()=>process.nextTick(()=>client.emit('redirect',302,'GET','https://evil.example/blocked',{location:['https://evil.example/blocked']}));client.abort=()=>{aborted=true;client.emit('abort');};client.followRedirect=()=>assert.fail('adapter must never follow a redirect');return client;}};
+  const response=await updater.createElectronFetch(net)('https://github.com/fixture');assert.equal(response.status,302);assert.equal(response.headers.get('location'),'https://evil.example/blocked');assert.equal(aborted,true);
+});
+test('cancelling the Electron response body aborts its upstream request',async()=>{
+  let aborted=false;const net={request:()=>{const client=new EventEmitter();client.setHeader=()=>{};client.end=()=>process.nextTick(()=>{const stream=new Readable({read(){}});stream.statusCode=200;stream.headers={'content-type':['application/octet-stream']};client.emit('response',stream);});client.abort=()=>{aborted=true;client.emit('abort');};return client;}};
+  const response=await updater.createElectronFetch(net)('https://github.com/fixture');await response.body.cancel();await new Promise(resolve=>setImmediate(resolve));assert.equal(aborted,true);
 });
