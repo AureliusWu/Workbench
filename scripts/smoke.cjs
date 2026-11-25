@@ -225,7 +225,15 @@ async function testFiles() {
     assert.equal(entries.find(file => file.name === '参考图片.png').category, '图片');
     assert.equal(entries.find(file => file.name === '会议材料').isDirectory, true);
     await assert.rejects(page.evaluate(folder => window.workbench.listFiles(folder), evidenceDir), /授权|选择文件夹/);
-    measurements.files = { status: 'PASS', entries: entries.length, rejectedOutsideSelectedFolder: true };
+    await openView('文件速达');
+    await page.getByRole('button', { name: '选择文件夹' }).click();
+    await page.locator('.file-entry').filter({ hasText: '会议材料' }).press('Enter');
+    await page.getByRole('button', { name: '返回上一级文件夹' }).waitFor();
+    assert.match(await page.locator('.folder-path').textContent(), /会议材料/);
+    await page.getByRole('button', { name: '返回上一级文件夹' }).click();
+    await page.locator('.file-entry').filter({ hasText: '采购清单.docx' }).waitFor();
+    await openView('今日工作台');
+    measurements.files = { status: 'PASS', entries: entries.length, rejectedOutsideSelectedFolder: true, keyboardFolderNavigation: true };
   } finally {
     await app.evaluate(({ dialog }) => { dialog.showOpenDialog = globalThis.__smokeOpenDialog; delete globalThis.__smokeOpenDialog; });
   }
@@ -324,7 +332,7 @@ async function testWorkspaceUpgrade() {
   assert.equal(await page.getByTestId('task-title-input').inputValue(), '开会');
   await page.getByRole('button', { name: '取消', exact: true }).click();
   const taskItem = page.getByTestId('task-item').filter({ hasText: '开会' });
-  await taskItem.getByRole('checkbox').first().check();
+  await page.getByTestId('week-calendar').locator('.wb-week-task').filter({ has: page.getByRole('button', { name: new RegExp(`${tomorrowKey} 15:00.*开会`) }) }).getByRole('checkbox').check();
   const hasStrike = locator => locator.evaluate(node => getComputedStyle(node).textDecorationLine.includes('line-through'));
   assert.equal(await hasStrike(taskButton.locator('.wb-week-task-title')), true);
   assert.equal(await hasStrike(taskItem.locator('.task-title')), true);
@@ -424,11 +432,29 @@ async function testWorkspaceUpgrade() {
   assert.equal(await note.getByText('会议', { exact: true }).count(), 0);
 
   await openView('今日工作台');
+  await page.keyboard.press('Control+k');
+  const search = page.getByRole('dialog', { name: '搜索工作台' });
+  await search.getByRole('textbox', { name: '搜索待办和便笺' }).fill('检查投影设备');
+  await search.getByRole('textbox', { name: '搜索待办和便笺' }).press('Enter');
+  assert.equal(await page.getByTestId('task-title-input').inputValue(), '核对会议室预约');
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: '搜索工作台', exact: true }).click();
+  await search.getByRole('textbox', { name: '搜索待办和便笺' }).fill(noteTitle);
+  await search.getByRole('button', { name: new RegExp(noteTitle) }).click();
+  assert.equal(await page.getByTestId('note-input').inputValue(), noteTitle);
+  await page.getByRole('button', { name: '取消编辑', exact: true }).click();
+  await openView('今日工作台');
+  await page.getByRole('button', { name: '应用更新', exact: true }).click();
+  const updateDialog = page.getByRole('dialog', { name: '应用更新' });
+  await updateDialog.waitFor();
+  assert.match(await updateDialog.textContent(), new RegExp(require('../package.json').version.replaceAll('.', '\\.')));
+  await page.keyboard.press('Escape');
+  await updateDialog.waitFor({ state: 'hidden' });
   await page.setViewportSize({ width: 1366, height: 768 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1), true, 'dashboard should fit the desktop viewport');
   assert.equal(await page.getByTestId('week-calendar').locator('.wb-week-column').count(), 7);
   await page.screenshot({ path: path.join(evidenceDir, 'workbench-1366x768.png') });
-  measurements.workspaceUpgrade = { status: 'PASS', legacyStartupUnchanged: true, legacyImport: true, naturalTask: true, historicalMarkdown: true, tagsArchiveRestart: true, desktopViewport: '1366x768' };
+  measurements.workspaceUpgrade = { status: 'PASS', legacyStartupUnchanged: true, legacyImport: true, naturalTask: true, inlineCalendarCompletion: true, historicalMarkdown: true, tagsArchiveRestart: true, globalSearch: true, updateDialog: true, desktopViewport: '1366x768' };
 }
 
 async function main() {

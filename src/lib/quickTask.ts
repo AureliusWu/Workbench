@@ -25,7 +25,7 @@ export function parseQuickTask(input:string,todayKey:string):QuickTaskResult {
   const original=input.trim().replace(/：/g,':');
   if(!original)throw new Error('先写一件要做的事，例如“明天下午三点开会”。');
   if(original.length>1000)throw new Error('这句话有点长，请精简到 1000 字以内。');
-  if(/每(?:天|日|周|星期|月)|每日|工作日/.test(original))throw new Error('快速添加暂不解析重复规则，请在新建待办中设置重复。');
+  if(/^\s*(?:(?:请|帮我|提醒我|提醒一下)\s*)*(?:每(?:天|日|周|星期|月)|每日|每个工作日)/.test(original))throw new Error('快速添加暂不解析重复规则，请在新建待办中设置重复。');
   if(/(?:\d+|[一二两三四五六七八九十]+)(?:分钟|小时|天|周)(?:后|前)/.test(original))throw new Error('相对时长需要当前钟点，快速添加不会猜测。请写明日期和时间，例如“明天下午三点”。');
   // RegExp indices are UTF-16 code units, as are split('') indices. Keep emoji before tokens intact.
   const chars=original.split(''),removed=chars.map(()=>false),dates:Span[]=[],times:Span[]=[],warnings:string[]=[];
@@ -40,6 +40,7 @@ export function parseQuickTask(input:string,todayKey:string):QuickTaskResult {
   }
   takeDate(/(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)/g,m=>checkedDate(Number(m[1]),Number(m[2]),Number(m[3])));
   takeDate(/(\d{4})年(\d{1,2})月(\d{1,2})[日号]?/g,m=>checkedDate(Number(m[1]),Number(m[2]),Number(m[3])));
+  takeDate(/(今年|明年|后年)\s*(\d{1,2})(?:月|\/)(\d{1,2})[日号]?/g,m=>checkedDate(today.getFullYear()+({今年:0,明年:1,后年:2} as Record<string,number>)[m[1]],Number(m[2]),Number(m[3])));
   takeDate(/(下下|下|本|这)?(?:周|星期|礼拜)([一二三四五六日天1-7])/g,m=>{
     const weekday=weekdayNumber[m[2]],prefix=m[1];
     if(prefix)return addDays(weekStart(todayKey),weekday+(prefix==='下'?7:prefix==='下下'?14:0));
@@ -52,11 +53,14 @@ export function parseQuickTask(input:string,todayKey:string):QuickTaskResult {
   });
   takeDate(/(?<!\d)(\d{1,2})月(\d{1,2})[日号]?/g,m=>checkedDate(today.getFullYear(),Number(m[1]),Number(m[2])));
   takeDate(/(?<![\d/])(\d{1,2})\/(\d{1,2})(?![\d/])/g,m=>checkedDate(today.getFullYear(),Number(m[1]),Number(m[2])));
-  takeDate(/(?<!\d)(\d{1,2})[日号]/g,m=>checkedDate(today.getFullYear(),today.getMonth()+1,Number(m[1])));
+  takeDate(/(?<!\d)(\d{1,2})[日号](?!会议室|楼|房|工位|窗口|线|口|柜|门|桌|机|设备|项目|方案|文件|合同|车|航班|选手|候选|样品|文档|报告)/g,m=>checkedDate(today.getFullYear(),today.getMonth()+1,Number(m[1])));
   takeDate(/不设日期|无日期|待安排/g,()=> '');
   if(dates.length>1)throw new Error('识别到多个日期，请每次只添加一件事，并保留一个明确日期。');
   if(/下下周|下周|本周|这周|周末|月底|月末|下个月|下月|过几天/.test(mask()))throw new Error('日期还不够明确，请写到具体一天，例如“下周一”或“12月5日”。');
 
+  // A 1:1 conversation or a score is task content, not a one-minute clock time.
+  const ratios=mask().matchAll(/\d{1,3}\s*:\s*\d{1,3}(?=\s*(?:沟通|会议|面谈|辅导|比例|比赛|比分|访谈))/g);
+  for(const ratio of ratios)for(let i=ratio.index!;i<ratio.index!+ratio[0].length;i++)chars[i]=' ';
   const number='(?:\\d{1,2}|[零〇一二两三四五六七八九十]{1,3})';
   const timePattern=new RegExp(`(?<![\\d零〇一二两三四五六七八九十])(凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|晚间)?\\s*(${number})(?::(\\d{1,2})(?!\\d)|(?:点|时)(?:钟)?(半|一刻|三刻|${number}分?)?)(?![\\d零〇一二两三四五六七八九十])`,'g');
   let match:RegExpExecArray|null;const timeSource=mask();
@@ -83,7 +87,7 @@ export function parseQuickTask(input:string,todayKey:string):QuickTaskResult {
       }
     }
     let start=match.index,end=match.index+match[0].length,value=`${String(hour).padStart(2,'0')}:${String(minuteRaw).padStart(2,'0')}`;
-    const approximatePrefix=prefix.match(/(?:大约|大概|约)\s*$/),relativeSuffix=suffix.match(/^\s*(?:左右|前后|以前|以后|之前|之后|前|后)/);
+    const approximatePrefix=prefix.match(/(?:大约|大概)\s*$|(?<![\u4e00-\u9fff])约\s*$/),relativeSuffix=suffix.match(/^\s*(?:左右|前后|以前|以后|之前|之后|前|后)/);
     if(approximatePrefix||relativeSuffix){
       value='';warnings.push('识别到大约或前后时间，未设置准确提醒时间；请确认后补充具体钟点。');
       if(approximatePrefix)start-=approximatePrefix[0].length;
@@ -98,16 +102,28 @@ export function parseQuickTask(input:string,todayKey:string):QuickTaskResult {
   if(/\d{1,2}\s*[:点时]/.test(mask()))throw new Error('时间格式未能识别，请改成“15:00”或“下午三点半”。');
   const fuzzy=/下班前|上班前|午饭后|午饭前|晚饭后|晚饭前|睡前|一早|凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|晚间/g;
   let vague=false;const beforeTitle=mask();
-  while((match=fuzzy.exec(beforeTitle))){vague=true;for(let i=match.index;i<match.index+match[0].length;i++){chars[i]=' ';removed[i]=true}}
+  while((match=fuzzy.exec(beforeTitle))){
+    const prefix=beforeTitle.slice(0,match.index).trim();
+    const protectedWord=/^(?:下午茶|下午好|上午好|早上好|晚上好|晚间新闻|上午场|下午场)/.test(beforeTitle.slice(match.index));
+    if(protectedWord||! /^(?:(?:请|帮我|提醒我|提醒一下|提醒|在|于)\s*)*$/.test(prefix))continue;
+    vague=true;for(let i=match.index;i<match.index+match[0].length;i++){chars[i]=' ';removed[i]=true}
+  }
   const date=dates[0]?.value||'',time=times[0]?.value||'';
   if(date&&(Number(date.slice(0,4))<1900||Number(date.slice(0,4))>2199))throw new Error('识别出的日期超出 1900 至 2199 年，请修改日期。');
   if(time&&!date)throw new Error('识别到了时间，但没有明确日期。请补充“今天”“明天”或具体日期后再添加。');
-  const reminderRequested=/^\s*(?:在|于)?\s*(?:请)?(?:帮我)?提醒(?:我|一下)?/.test(mask());
-  let title=original.split('').filter((_,index)=>!removed[index]).join('').replace(/^\s*(?:在|于)\s*/,'').replace(/^\s*(?:请)?(?:帮我)?提醒(?:我|一下)?\s*/,'').trim().replace(/^[，,；;：:、\s]+|[，,；;：:、\s]+$/g,'').replace(/\s+/g,' ');
+  const leadingConnector=dates.some(span=>/^\s*(?:在|于)\s*$/.test(original.slice(0,span.start)));
+  const singleReminder=dates.some(span=>/^\s*(?:请)?(?:帮我)?提醒\s*$/.test(original.slice(0,span.start)));
+  const directive=/^\s*(?:请)?(?:帮我)?(?:提醒我|提醒一下)\s*/;
+  let title=original.split('').filter((_,index)=>!removed[index]).join('');
+  if(leadingConnector)title=title.replace(/^\s*(?:在|于)\s*/,'');
+  const reminderRequested=directive.test(title)||singleReminder;
+  title=title.replace(directive,'');
+  if(singleReminder)title=title.replace(/^\s*(?:请)?(?:帮我)?提醒\s*/,'');
+  title=title.trim().replace(/^[，,；;：:、\s]+|[，,；;：:、\s]+$/g,'').replace(/\s+/g,' ');
   if(!title)throw new Error('日期和时间已识别，还需要写要做的事，例如“明天下午三点开会”。');
   if(title.length>300)throw new Error('待办名称请精简到 300 字以内，详细内容可在小步骤中补充。');
   if(vague)warnings.push('时段没有具体钟点，未设置提醒时间；请确认后按需补充。');
-  if(reminderRequested&&!time)warnings.push('还没有具体提醒时间，当前只安排日期，不会弹出到时提醒。');
+  if(reminderRequested&&!time)warnings.push(date?'还没有具体提醒时间，当前只安排日期，不会弹出到时提醒。':'还没有安排日期和具体提醒时间，当前保存为待安排事项，不会弹出到时提醒。');
   if(date&&date<todayKey)warnings.push('识别出的日期已经过去，请确认是否需要修改年份或日期。');
   return {title,date,time,reminder:!!(date&&time),...(warnings.length?{warning:[...new Set(warnings)].join(' ')}:{})};
 }

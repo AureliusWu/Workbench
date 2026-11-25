@@ -61,4 +61,28 @@ describe('Chinese quick task parsing',()=>{
   expect(()=>parseQuickTask('明天下午3点到4点开会',today)).toThrow('多个时间');
   expect(()=>parseQuickTask('明天9点100分开会',today)).toThrow();
  });
+ it('honors explicit relative years across New Year and validates leap dates in that year',()=>{
+  expect(parseQuickTask('明年1月5号交材料','2026-12-31')).toMatchObject({title:'交材料',date:'2027-01-05'});
+  expect(parseQuickTask('今年1月5号交材料','2027-01-01')).toMatchObject({title:'交材料',date:'2027-01-05'});
+  expect(parseQuickTask('后年2月29日交材料','2026-12-31')).toMatchObject({title:'交材料',date:'2028-02-29'});
+  expect(()=>parseQuickTask('明年2月29日交材料','2026-12-31')).toThrow('2027年2月29日');
+  expect(parseQuickTask('下周一交周报','2026-12-31').date).toBe('2027-01-04');
+ });
+ it('keeps ordinary title prefixes and administrative names intact',()=>{
+  expect(parseQuickTask('今天在家办公',today)).toMatchObject({title:'在家办公',date:today,time:''});
+  expect(parseQuickTask('在家办公',today).title).toBe('在家办公');
+  expect(parseQuickTask('今天于经理确认会场',today).title).toBe('于经理确认会场');
+  expect(parseQuickTask('提醒事项整理',today).title).toBe('提醒事项整理');
+  expect(parseQuickTask('在明天下午三点开会',today)).toMatchObject({title:'开会',date:'2026-11-25',time:'15:00'});
+  expect(parseQuickTask('今天预订2号会议室',today)).toMatchObject({title:'预订2号会议室',date:today});
+  expect(parseQuickTask('准备1:1沟通材料',today)).toMatchObject({title:'准备1:1沟通材料',date:'',time:''});
+ });
+ it('does not remove non-scheduling words from task titles',()=>{
+  expect(parseQuickTask('明天整理每周工作报告',today)).toMatchObject({title:'整理每周工作报告',date:'2026-11-25'});
+  expect(parseQuickTask('制定工作日值班安排',today)).toMatchObject({title:'制定工作日值班安排',date:''});
+  expect(parseQuickTask('今天准备下午茶',today)).toMatchObject({title:'准备下午茶',date:today});
+  expect(parseQuickTask('下午茶采购清单',today)).toMatchObject({title:'下午茶采购清单',date:''});
+  expect(parseQuickTask('明天预约15:00开会',today)).toMatchObject({title:'预约开会',time:'15:00',reminder:true});
+  expect(parseQuickTask('提醒我买牛奶',today)).toMatchObject({title:'买牛奶',date:'',reminder:false,warning:expect.stringContaining('还没有安排日期')});
+ });
 });

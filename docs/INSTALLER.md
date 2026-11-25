@@ -19,9 +19,23 @@ GUID 与此前 appId 按 electron-builder 规则生成的身份一致。更改 a
 
 ## 从旧便携版过渡
 
-1.0.1 及更早便携版没有 NSIS 安装登记，不能把其任意位置的 EXE 当作“已安装目录”覆盖。安装 1.1.0 会建立固定程序目录和新快捷方式，沿用同一份用户数据；不会搜盘、删除或改写用户自行存放的旧便携 EXE。
+1.0.1 及更早版本以便携 EXE 运行。运行当前安装包会建立固定程序目录和新快捷方式，并读取同一份用户数据。之前自存的便携 EXE 仍可在原位置找到。
 
 升级前从旧程序托盘退出，安装后使用“花笺 Workbench”快捷方式。不要继续点击收藏在其他文件夹的旧便携 EXE。
+
+## 自动更新与发布
+
+安装版从 1.2.0 起会在后台从本仓库 GitHub Release 检查、下载新版。更新器先用内置 Ed25519 公钥验证 `workbench-update.json`，再核对 Windows 安装包的长度和 SHA-256。选择「重启更新」后，工作台保存记录并退出，NSIS 沿用当前用户的安装路径重新打开应用。下载或校验失败时可重试，或使用发行页的安装包。
+
+发布时使用通过 Windows CI 生命周期测试的同一份安装包。`workbench-update.unsigned.json` 是 CI 生成的版本、文件名、长度与 SHA-256 记录，需与下载的安装包匹配。下面的命令在持有本地签名密钥的 Windows 用户下生成最终清单。
+
+```powershell
+node scripts/sign-update.cjs release/v1.2.0/Workbench-Setup-1.2.0-win-x64.exe release/v1.2.0/workbench-update.json
+```
+
+一起上传安装包、`SHA256SUMS.txt`、`workbench-update.json` 到同一个稳定发行版。发布后检查公开的 `releases/latest/download/workbench-update.json`，并用 `electron/update-public-key.pem` 校验内容与安装包。
+
+私钥由 Windows 当前用户 DPAPI 保护，存放在 `%LOCALAPPDATA%\WorkbenchReleaseSigning\update-ed25519.dpapi`。仓库与 CI 只持有公钥。保留这份受保护的密钥及其 Windows 账户，后续版本才能为现有安装签名。若密钥不可用，已有用户需手动安装包含新公钥的受信任发行版。
 
 ## 安装生命周期验证
 
@@ -30,21 +44,21 @@ GUID 与此前 appId 按 electron-builder 规则生成的身份一致。更改 a
 测试步骤：
 
 1. 确认生产 GUID 没有现存安装登记、没有运行中的 Workbench，也没有已有用户记录。
-2. 用同一 NSIS 配方构建测试专用旧版本 1.0.9；这是合成安装基线，并非历史公开发行版。
+2. 用同一 NSIS 配方构建测试专用 1.1.9 版本，作为合成安装基线。
 3. 静默安装到工作区 `artifacts/installer-*/installed-program`，保存旧格式任务、便笺、复盘、专注记录、设置与测试用加密密钥。
-4. 运行本次真实发行安装包，不提供 `/D`，要求通过稳定登记自动找到原测试安装目录。
+4. `npm run test:updater` 使用临时公钥和本机测试源，先验证坏签名被拒绝，再让更新器下载真实候选安装包，调用安装交接并确认新版重新打开。`npm run test:installer` 可直接验收同一安装包的手动覆盖路径。两条路径都通过稳定登记定位原安装目录。
 5. 核对旧程序哨兵与旧 `app.asar` 已被替换、安装目录不变，数据与密钥文件哈希未变化；启动新版读取原记录。
 6. 正常静默卸载，确认程序与安装登记移除，用户数据及加密密钥仍保留。
 
-测试使用 `/S` 抑制安装结束后自动运行，再由测试明确启动已安装 EXE。该流程不使用清除数据参数。快捷方式仅在临时账户内操作，并保留和恢复已有同名测试入口。
+初始基线静默安装后由脚本打开。自动更新路径检查 NSIS 安装后的自动重启。快捷方式只在临时账户内操作。
 
 如需指定安装包：
 
 ```powershell
-$env:WORKBENCH_INSTALLER = 'D:\path\Workbench-Setup-1.1.0-win-x64.exe'
-npm run test:installer
+$env:WORKBENCH_INSTALLER = 'D:\path\Workbench-Setup-1.2.0-win-x64.exe'
+npm run test:updater
 # 或直接传参，仍受临时托管账户保护
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/installer-lifecycle.ps1 -InstallerPath 'D:\path\Workbench-Setup-1.1.0-win-x64.exe'
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/installer-lifecycle.ps1 -UseUpdater -InstallerPath 'D:\path\Workbench-Setup-1.2.0-win-x64.exe'
 ```
 
 真实 CI 运行结果记录在对应工作流与 `artifacts/installer-*/results.json`；本说明本身不代表生命周期测试已经通过。

@@ -1,4 +1,4 @@
-import type { AppState, Settings, Task } from '../types';
+import type { AppState, Settings, Step, Task } from '../types';
 import { addDays, dateKey, daysBetween, getDayInfo, parseDate, weekStart } from './calendar';
 
 const OCCURRENCE_SEPARATOR='::';
@@ -71,6 +71,69 @@ export function deleteTask(tasks:Task[],id:string):Task[] {
   const template=tasks.find(task=>task.id===templateId);
   if (template && template.repeat!=='none') return tasks.filter(task=>taskTemplateId(task.id)!==templateId);
   return tasks.filter(task=>task.id!==id);
+}
+
+/** Preserve unchanged checklist identities when lines are inserted, deleted or reordered. */
+export function reconcileTaskSteps(existing:Step[],titles:string[]):Step[]{
+  const available=new Map<string,Step[]>();
+  for(const step of existing){const key=step.title.trim();available.set(key,[...(available.get(key)||[]),step])}
+  const cleaned=titles.map(title=>title.trim()).filter(Boolean);
+  if(cleaned.length>1000)throw new Error('小步骤超过 1000 条，请拆成多个待办。');
+  return cleaned.map(title=>{
+    if(title.length>1000)throw new Error('单个小步骤请精简到 1000 字以内。');
+    const previous=available.get(title)?.shift();
+    return previous?{...previous,title}:{id:crypto.randomUUID(),title,done:false};
+  });
+}
+
+export interface UpsertOptions { expectedExistingIds?:string[] }
+/**
+ * Save task edits without rewriting earlier recurrence history. When date/repeat changes,
+ * existing occurrences before today are frozen and the new rule starts on/after today.
+ * The operation is immutable and refuses preservation exceeding the storage limit.
+ */
+export function upsertTasks(tasks:Task[],updates:Task[],todayKey:string,options:UpsertOptions={}):Task[]{
+  parseDate(todayKey);
+  if(new Set(updates.map(task=>task.id)).size!==updates.length)throw new Error('保存内容中出现重复待办，请重新打开后再试。');
+  for(const id of options.expectedExistingIds||[]){
+    if(!materialize(tasks,id))throw new Error('这条待办已被删除或重复规则已改变，请关闭编辑框后重新选择。');
+  }
+  const result=new Map(tasks.map(task=>[task.id,task]));
+  function preserve(task:Task){
+    if(!result.has(task.id))result.set(task.id,task);
+    if(result.size>50000)throw new Error('保留重复待办历史后会超过 50000 条，请先导出备份并整理旧系列，再重新保存；本次未修改数据。');
+  }
+  for(const update of updates){
+    if(update.date)parseDate(update.date);
+    else if(update.repeat!=='none'||update.time||update.reminder)throw new Error('未安排日期的待办不能设置重复或到时提醒，请先安排日期。');
+    const occurrence=splitOccurrence(update.id),old=tasks.find(task=>task.id===update.id);
+    if(occurrence.date){
+      if(update.date!==occurrence.date||update.repeat!=='none')throw new Error('这一次的日期和重复规则不能改变，请改为编辑整个重复系列。');
+      if(!old&&!materialize(tasks,update.id))throw new Error('这一次的待办已失效，请重新打开当前系列后再修改。');
+    }
+    let next={...update,steps:update.steps.map(step=>({...step}))};
+    const scheduleChanged=!!old&&(old.date!==next.date||old.repeat!==next.repeat);
+    if(old&&old.repeat!=='none'&&scheduleChanged){
+      if(next.repeat==='none'&&next.date&&next.date<todayKey)throw new Error('停用重复时，请为保留的单次待办选择今天或未来日期，或清空日期。过去的系列记录会保留。');
+      // An old schedule is evidence only for dates it actually projected; do not fill gaps or overwrite snapshots.
+      if(old.date){
+        const stride=old.repeat==='daily'?1:7;
+        for(let day=old.date;day<todayKey;day=addDays(day,stride)){
+          const id=`${old.id}${OCCURRENCE_SEPARATOR}${day}`;
+          preserve({...old,id,date:day,repeat:'none',done:false,completedAt:undefined,steps:old.steps.map(step=>({...step,done:false}))});
+        }
+      }
+      if(next.repeat!=='none'&&next.date<todayKey)next={...next,date:nextOccurrenceDate(next,todayKey)!};
+    }else if(old&&old.repeat==='none'&&next.repeat!=='none'&&!occurrence.date){
+      // Turning an existing one-time item into a series must not erase its completion/checklist record.
+      if(old.date&&(old.date<todayKey||old.done||old.steps.some(step=>step.done)))preserve({...old,id:`${old.id}${OCCURRENCE_SEPARATOR}${old.date}`,steps:old.steps.map(step=>({...step}))});
+      if(next.date<todayKey)next={...next,date:nextOccurrenceDate(next,todayKey)!};
+    }
+    if(next.repeat!=='none')next={...next,done:false,completedAt:undefined};
+    result.set(next.id,next);
+    if(result.size>50000)throw new Error('待办已超过 50000 条，请先导出备份并整理旧数据，本次未修改数据。');
+  }
+  return [...result.values()];
 }
 export interface DailyStats { date:string; total:number; completed:number; rate:number; focusMinutes:number }
 export interface WeeklyStats {

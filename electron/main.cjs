@@ -4,6 +4,7 @@ const fs=require('node:fs');
 const fsp=require('node:fs/promises');
 const path=require('node:path');
 const {validateState,readState,writeState,localDate,occursOn,reminderKey,normalizeAiEndpoint,normalizeApiKey,validateReviewExport,exportTarget,backupBeforeImport,MAX_BYTES}=require('./state.cjs');
+const {createWindowsUpdater,createElectronFetch}=require('./updater.cjs');
 app.setName('Workbench');
 if (process.env.WORKBENCH_DATA_DIR) {
   const isolated=path.resolve(process.env.WORKBENCH_DATA_DIR);
@@ -14,6 +15,7 @@ app.setAppUserModelId('com.aureliuswu.workbench');
 const mainFile=path.join(__dirname,'../dist/index.html');
 const devUrl=!app.isPackaged && process.env.WORKBENCH_DEV_URL;
 let mainWindow,tray,state=null,quitting=false,storeError=null,captureInProgress=false;
+let updaterReady;
 const utilityWindows=new Map();
 const allowedRoots=new Set();
 const activeNotifications=new Set();
@@ -253,6 +255,10 @@ function installIpc() {
   handle('autoLaunch',enabled=>{if(typeof enabled!=='boolean')throw new Error('设置格式不正确。');if(!app.isPackaged)throw new Error('开机启动仅可在发行版中设置。');app.setLoginItemSettings({openAtLogin:enabled,path:process.env.PORTABLE_EXECUTABLE_FILE||process.execPath});});
   let keyWrite=Promise.resolve();
   handle('ai:key',key=>{const operation=keyWrite.catch(()=>{}).then(()=>saveApiKey(key));keyWrite=operation;return operation;});handle('ai:hasKey',()=>fs.existsSync(keyFile()));handle('ai:review',aiReview);handle('version',()=>app.getVersion());
+  handle('update:get',async()=> (await updaterReady).getState());
+  handle('update:check',async()=> (await updaterReady).check());
+  handle('update:automatic',async enabled=> (await updaterReady).setAutomatic(enabled));
+  handle('update:install',async()=>{if(storeError)throw new Error('本地数据尚未恢复，暂不能重启安装更新。');await keyWrite;return (await updaterReady).install();});
   ipcMain.handle('utility:ready',event=>{const entry=utilityWindows.get(event.sender.id);if(!entry||event.senderFrame!==entry.win.webContents.mainFrame)throw new Error('不允许的操作来源。');return entry.payload;});
   ipcMain.handle('utility:action',async(event,action,value)=>{
     const entry=utilityWindows.get(event.sender.id);if(!entry||event.senderFrame!==entry.win.webContents.mainFrame)throw new Error('不允许的操作来源。');
@@ -275,6 +281,7 @@ if(!app.requestSingleInstanceLock()){app.quit();}else{
     try{const result=readState(dataFile());state=result.state;if(result.recovered)setTimeout(()=>notify('已从恢复副本载入','主数据文件不可用，花笺已载入最近一次有效备份。'),2500);}catch(error){storeError=error.message;}
     try{const ledger=JSON.parse(fs.readFileSync(ledgerFile(),'utf8'));if(ledger&&typeof ledger==='object'&&!Array.isArray(ledger))reminderLedger=ledger;}catch{}
     installIpc();createMain();createTray();
+    updaterReady=createWindowsUpdater({app,fetchImpl:createElectronFetch(require('electron').net),onState:update=>{if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('update:state',update);},onQuit:()=>{setTimeout(()=>{quitting=true;app.quit();},150);}});
     globalShortcut.register('CommandOrControl+Alt+A',()=>capture().catch(e=>notify('截图未完成',e.message)));
     globalShortcut.register('CommandOrControl+Alt+V',()=>pinClipboard().catch(e=>notify('贴图未完成',e.message)));
     setInterval(checkReminders,15000).unref();setTimeout(checkReminders,3000);

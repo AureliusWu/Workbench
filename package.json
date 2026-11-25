@@ -1,7 +1,7 @@
 {
   "name": "workbench",
   "productName": "花笺 Workbench",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "本地优先的 Windows 个人与办公工作台",
   "author": "AureliusWu",
   "license": "MIT",
@@ -15,8 +15,10 @@
     "dist": "npm run build && electron-builder --win nsis --x64 --publish never",
     "dist:portable": "npm run build && electron-builder --win portable --x64 --publish never",
     "test:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/installer-lifecycle.ps1",
+    "test:updater": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/installer-lifecycle.ps1 -UseUpdater",
+    "update:manifest": "node scripts/update-manifest.cjs",
     "postinstall": "node node_modules/electron/install.js",
-    "test:native": "node --test scripts/native-test.cjs"
+    "test:native": "node --test scripts/native-test.cjs scripts/update-test.cjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

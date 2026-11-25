@@ -63,6 +63,26 @@ export interface FileEntry {
   modified: string;
   isDirectory: boolean;
 }
+export interface UpdateState {
+  enabled: boolean;
+  automatic: boolean;
+  status:
+    | "disabled"
+    | "idle"
+    | "checking"
+    | "up-to-date"
+    | "downloading"
+    | "ready"
+    | "installing"
+    | "error";
+  currentVersion: string;
+  availableVersion?: string;
+  progress?: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  checkedAt?: string;
+  message: string;
+}
 export interface DesktopApi {
   load: () => Promise<AppState | null>;
   save: (state: AppState) => Promise<void>;
@@ -93,6 +113,11 @@ export interface DesktopApi {
   saveApiKey: (key: string) => Promise<void>;
   hasApiKey: () => Promise<boolean>;
   version: () => Promise<string>;
+  getUpdate: () => Promise<UpdateState>;
+  checkUpdate: () => Promise<UpdateState>;
+  setAutomaticUpdates: (enabled: boolean) => Promise<UpdateState>;
+  installUpdate: () => Promise<void>;
+  onUpdate: (listener: (state: UpdateState) => void) => () => void;
 }
 declare global {
   interface Window {

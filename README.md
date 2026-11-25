@@ -4,11 +4,11 @@
 
 **Windows 10 / 11，64 位。数据保存在本机。**
 
-1.1.0 提供 Windows 一键安装版；后续运行新版安装程序即可覆盖已安装的旧程序，继续使用原来的本机记录。
+1.2.0 提供新的浅色界面，以及 Windows 安装版自动检查、下载和校验更新。
 
 ## 下载与运行
 
-到 [Releases](https://github.com/AureliusWu/Workbench/releases) 下载 `Workbench-Setup-1.1.0-win-x64.exe`，双击后自动安装并打开工作台，无需安装 Node.js 或浏览器。安装在当前 Windows 用户下，默认程序位置为 `%LOCALAPPDATA%\Programs\Workbench`，创建“花笺 Workbench”桌面及开始菜单快捷方式。
+到 [Releases](https://github.com/AureliusWu/Workbench/releases) 下载 `Workbench-Setup-1.2.0-win-x64.exe`，双击后自动安装并打开工作台，无需安装 Node.js 或浏览器。安装在当前 Windows 用户下，默认程序位置为 `%LOCALAPPDATA%\Programs\Workbench`，创建“花笺 Workbench”桌面及开始菜单快捷方式。
 
 以后下载新版 `Workbench-Setup-版本号-win-x64.exe` 再次打开，安装程序会识别同一份已安装程序并更新。任务、便笺、复盘、设置与本机加密密钥保存在独立数据目录，安装和正常卸载均保留这些记录。更新前可以先在设置中导出一份备份。
 
@@ -16,10 +16,17 @@
 
 发行版尚未购买代码签名证书，Windows 可能显示发布者未验证。请只从本仓库发行页下载，并用发行页中的 SHA-256 校验值确认文件来源。
 
+## 自动更新
+
+1.1.0 及更早版本需先手动安装 1.2.0。安装版默认在后台检查并下载新版，校验成功后，右上角会提示「有新版」。选择「重启更新」时先保存本机记录，再覆盖安装并重新打开。右上角「应用更新」可手动检查或关闭自动下载。便携版可在发行页下载新版。
+
+更新器通过 Workbench 自带的 Ed25519 公钥验证发行清单，并核对安装包 SHA-256。安装器仍为未做 Windows Authenticode 签名的版本。发布步骤见 [安装与更新约定](docs/INSTALLER.md)。
+
 ## 能做什么
 
 - **今天与日历**：日历与有日期的待办共用同一份数据，显示农历、节日与节气倒计时。
 - **待办与小步骤**：设置优先级、日期、时间、提醒和重复规则；大事拆成可逐项打勾的小步骤，完成后划线。
+- **全局搜索**：按 `Ctrl + K` 搜索待办、子步骤和便笺正文。周日历可直接勾选完成。
 - **安排大任务**：给出预计总时长与每天可投入时间，按工作日拆分安排。
 - **番茄钟**：开始、暂停、重置专注与休息，完成专注后累计记录。
 - **随手记**：记录临时想法，也可把便笺单独置顶在屏幕上。
@@ -79,7 +86,7 @@ npm start
 
 ```powershell
 npm test
-node --test scripts/native-test.cjs
+npm run test:native
 npm run build
 npm run test:e2e
 npm run dist

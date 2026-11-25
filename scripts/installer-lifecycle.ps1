@@ -1,7 +1,8 @@
 ﻿param(
   [string] $InstallerPath,
-  [string] $BaselineVersion = '1.0.9',
-  [string] $BaselineInstallerPath
+  [string] $BaselineVersion = '1.1.9',
+  [string] $BaselineInstallerPath,
+  [switch] $UseUpdater
 )
 $ErrorActionPreference = 'Stop'
 $workspacePath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -104,6 +105,34 @@ function Uninstall-OwnTest {
   while (@(Get-InstallRecords).Count -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 150 }
   if (@(Get-InstallRecords).Count) { throw 'Test uninstall registration was not removed.' }
 }
+function Wait-UpdatedApplication {
+  $expectedExe = [System.IO.Path]::GetFullPath((Join-Path $installPath 'Workbench.exe'))
+  $deadline = [DateTime]::UtcNow.AddSeconds(90)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    $candidates = @(Get-CimInstance Win32_Process -Filter "name='Workbench.exe'" | Where-Object {
+      $_.ExecutablePath -and [System.IO.Path]::GetFullPath($_.ExecutablePath) -eq $expectedExe -and $_.CommandLine -notmatch '--type='
+    })
+    foreach ($candidate in $candidates) {
+      $nativeProcess = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+      if ($nativeProcess -and $nativeProcess.MainWindowHandle -ne 0 -and $nativeProcess.MainWindowTitle) {
+        $details = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($expectedExe)
+        if ($details.ProductVersion -eq $version) {
+          Start-Sleep -Milliseconds 500
+          return [PSCustomObject]@{ ProcessId = $candidate.ProcessId; Executable = $expectedExe; WindowTitle = $nativeProcess.MainWindowTitle; Version = $details.ProductVersion }
+        }
+      }
+    }
+    Start-Sleep -Milliseconds 200
+  }
+  throw 'Updater did not restart the new installed application with a visible main window.'
+}
+function Stop-OwnRestartedApplication($Observed) {
+  if ([System.IO.Path]::GetFullPath($Observed.Executable) -ne [System.IO.Path]::GetFullPath((Join-Path $installPath 'Workbench.exe'))) { throw 'Refusing to stop a process outside the test install directory.' }
+  $actual = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [int]$Observed.ProcessId)
+  if (!$actual -or [System.IO.Path]::GetFullPath($actual.ExecutablePath) -ne [System.IO.Path]::GetFullPath($Observed.Executable)) { throw 'Restarted test process identity changed unexpectedly.' }
+  & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID ([int]$Observed.ProcessId) /T /F | Write-Host
+  if ($LASTEXITCODE -ne 0) { throw 'Unable to close the restarted test-only application.' }
+}
 
 try {
   if (@(Get-InstallRecords).Count) { throw 'An existing Workbench installation is registered. Lifecycle test refuses to modify it.' }
@@ -134,8 +163,19 @@ try {
   if (!$beforeUpgrade.Contains('workbench.json') -or !$beforeUpgrade.Contains('ai-key.bin')) { throw 'Seeded records or encrypted key missing.' }
   $oldProgramHash = Get-Sha256 (Join-Path $installPath 'resources\app.asar')
   Set-Content -LiteralPath (Join-Path $installPath 'old-program-sentinel.txt') -Value 'The replacement install must remove this old program file.'
-  # No /D here: the real stable identity must discover and replace its registered install path.
-  Run-Installer $InstallerPath '/S'
+  if ($UseUpdater) {
+    & node (Join-Path $PSScriptRoot 'updater-lifecycle.cjs') (Join-Path $installPath 'Workbench.exe') $profilePath $InstallerPath $version $evidencePath | Write-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Secure background updater fixture check failed.' }
+    $report.updater = Get-Content -LiteralPath (Join-Path $evidencePath 'updater-results.json') -Raw | ConvertFrom-Json
+    $beforeUpgrade = [ordered]@{}
+    foreach ($property in $report.updater.preInstallProtectedHashes.PSObject.Properties) { $beforeUpgrade[$property.Name] = $property.Value }
+    $report.restartedApplication = Wait-UpdatedApplication
+    Stop-OwnRestartedApplication $report.restartedApplication
+    $report.backgroundUpdateAndRestart = $true
+  } else {
+    # No /D here: the stable identity must discover and replace its registered install path.
+    Run-Installer $InstallerPath '/S'
+  }
   $report.upgradeRegistration = @(Assert-OwnInstallation $version)
   if (Test-Path -LiteralPath (Join-Path $installPath 'old-program-sentinel.txt')) { throw 'Upgrade left the old program sentinel in place.' }
   if ((Get-Sha256 (Join-Path $installPath 'resources\app.asar')) -eq $oldProgramHash) { throw 'Upgrade did not replace the old application package.' }

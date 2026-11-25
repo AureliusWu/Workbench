@@ -35,8 +35,16 @@ import {
   CheckCheck,
   CircleHelp,
   Repeat2,
+  RefreshCw,
 } from "lucide-react";
-import type { AppState, Task, Note, Priority, FileEntry } from "./types";
+import type {
+  AppState,
+  Task,
+  Note,
+  Priority,
+  FileEntry,
+  UpdateState,
+} from "./types";
 import {
   loadState,
   saveState,
@@ -49,6 +57,8 @@ import { version as appVersion } from "../package.json";
 import NotesPanel from "./components/NotesPanel";
 import { WeekCalendar } from "./components/WeekCalendar";
 import { ReviewTools } from "./components/ReviewTools";
+import { UpdateDialog } from "./components/UpdateDialog";
+import { WorkspaceSearch } from "./components/WorkspaceSearch";
 import { parseQuickTask } from "./lib/quickTask";
 import "./workspace.css";
 import {
@@ -64,6 +74,9 @@ import {
   deleteTask,
   nextOccurrenceDate,
   weeklyStats,
+  reconcileTaskSteps,
+  taskTemplateId,
+  upsertTasks,
 } from "./lib";
 
 type View = "today" | "calendar" | "tasks" | "notes" | "review" | "files";
@@ -77,6 +90,13 @@ const nav = [
 ] as const;
 const priorityNames = { high: "高优先级", medium: "中优先级", low: "低优先级" };
 const dayNames = ["一", "二", "三", "四", "五", "六", "日"];
+const unavailableUpdate: UpdateState = {
+  enabled: false,
+  automatic: false,
+  status: "disabled",
+  currentVersion: appVersion,
+  message: "请在 Windows 安装版中使用自动更新。",
+};
 function taskCollection(state: AppState, today: string): Task[] {
   const items = state.tasks.filter((t) => t.repeat === "none");
   for (const template of state.tasks.filter((t) => t.repeat !== "none")) {
@@ -103,6 +123,11 @@ export default function App() {
   );
   const [taskModal, setTaskModal] = useState<Task | "new" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateState>(unavailableUpdate);
+  const [updateError, setUpdateError] = useState("");
+  const [updatePending, setUpdatePending] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [toast, setToast] = useState("");
@@ -127,9 +152,13 @@ export default function App() {
   const [folder, setFolder] = useState("");
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [fileFilter, setFileFilter] = useState("全部");
+  const [folderHistory, setFolderHistory] = useState<string[]>([]);
+  const folderRequest = useRef(0);
   const saveQueue = useRef(Promise.resolve());
   const lastStored = useRef<AppState | null>(null);
   const importing = useRef(false);
+  const preparingUpdate = useRef(false);
+  const dialogTrigger = useRef<HTMLElement | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const focusHandled = useRef(false);
   const focusPlanned = useRef(25);
@@ -143,6 +172,26 @@ export default function App() {
       tell(e instanceof Error ? e.message : String(e));
     }
   };
+  useEffect(() => {
+    const api = window.workbench;
+    if (!api?.onUpdate || !api.getUpdate) return;
+    let active = true;
+    let receivedUpdate = false;
+    const off = api.onUpdate((update) => {
+      receivedUpdate = true;
+      if (active) setUpdateInfo(update);
+    });
+    void api
+      .getUpdate()
+      .then((update) => {
+        if (active && !receivedUpdate) setUpdateInfo(update);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      off();
+    };
+  }, []);
   useEffect(() => {
     let mounted = true;
     loadState()
@@ -184,7 +233,7 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
   useEffect(() => {
-    if (!focusEnd || importing.current) return;
+    if (!focusEnd || importing.current || preparingUpdate.current) return;
     const n = Math.max(0, Math.ceil((focusEnd - Date.now()) / 1000));
     setRemaining(n);
     if (n === 0 && !focusHandled.current) {
@@ -226,21 +275,159 @@ export default function App() {
   }, [focusMode, state.settings.focusMinutes, state.settings.breakMinutes]);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      const dialogs = document.querySelectorAll<HTMLElement>(
+        '[role="dialog"][aria-modal="true"]',
+      );
+      const dialog = dialogs[dialogs.length - 1];
+      if (e.key === "Tab" && dialog) {
+        const focusable = [
+          ...dialog.querySelectorAll<HTMLElement>(
+            'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]',
+          ),
+        ].filter((element) => element.getClientRects().length > 0);
+        if (!focusable.length) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (
+          !dialog.contains(document.activeElement) ||
+          (e.shiftKey
+            ? document.activeElement === first
+            : document.activeElement === last)
+        ) {
+          e.preventDefault();
+          (e.shiftKey ? last : first).focus();
+        }
+        return;
+      }
       if (e.key === "Escape") {
+        if (preparingUpdate.current) return;
         setTaskModal(null);
         setTaskDateOverride(null);
         setSettingsOpen(false);
+        setSearchOpen(false);
+        setUpdateOpen(false);
+        requestAnimationFrame(() => dialogTrigger.current?.focus());
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === "n") {
+      if (
+        !ready ||
+        dialog ||
+        preparingUpdate.current ||
+        (!e.ctrlKey && !e.metaKey)
+      )
+        return;
+      if (e.key.toLowerCase() === "n") {
         e.preventDefault();
         setTaskDateOverride(null);
         setTaskModal("new");
       }
+      if (e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        dialogTrigger.current =
+          document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
+        setSearchOpen(true);
+      }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, []);
+  }, [ready]);
   const change = (fn: (s: AppState) => AppState) => setState(fn);
+
+  function closeAuxiliaryDialog() {
+    if (preparingUpdate.current) return;
+    setSearchOpen(false);
+    setUpdateOpen(false);
+    requestAnimationFrame(() => dialogTrigger.current?.focus());
+  }
+
+  async function runUpdateAction(action: () => Promise<UpdateState>) {
+    setUpdateError("");
+    try {
+      setUpdateInfo(await action());
+    } catch (cause) {
+      setUpdateError(
+        cause instanceof Error ? cause.message : "更新操作未完成，请重试。",
+      );
+    }
+  }
+
+  async function installAvailableUpdate() {
+    if (!window.workbench || preparingUpdate.current) return;
+    if (quickText.trim() || noteText.trim()) {
+      setUpdateError("还有待办或便笺草稿，请先保存草稿，再重启更新。");
+      return;
+    }
+    if (focusEnd || importing.current || aiBusy) {
+      setUpdateError("请等正在进行的专注、恢复或复盘结束后再更新。");
+      return;
+    }
+    preparingUpdate.current = true;
+    setUpdatePending(true);
+    setUpdateError("");
+    try {
+      await saveQueue.current;
+      if (state !== lastStored.current) {
+        await saveState(state);
+        lastStored.current = state;
+      }
+      await window.workbench.installUpdate();
+    } catch (cause) {
+      preparingUpdate.current = false;
+      setUpdatePending(false);
+      setUpdateError(
+        cause instanceof Error ? cause.message : "更新无法启动，请重试。",
+      );
+    }
+  }
+
+  function editNote(note: Note) {
+    if (
+      editingNote !== note.id &&
+      noteText.trim() &&
+      !confirm("打开另一条便笺并放弃当前草稿？")
+    )
+      return false;
+    setNoteText(note.text);
+    setNoteColor(note.color);
+    setNoteTagIds(note.tagIds);
+    setEditingNote(note.id);
+    return true;
+  }
+
+  async function browseFolder(
+    path: string,
+    history: string[],
+    retainFilter = false,
+  ) {
+    if (!window.workbench) return;
+    const request = ++folderRequest.current;
+    const entries = await window.workbench.listFiles(path);
+    if (request !== folderRequest.current) return;
+    setFolder(path);
+    setFiles(entries);
+    setFolderHistory(history);
+    setFileFilter((category) =>
+      retainFilter && entries.some((file) => file.category === category)
+        ? category
+        : "全部",
+    );
+  }
+
+  async function openFileEntry(file: FileEntry) {
+    if (file.isDirectory)
+      await browseFolder(file.path, [...folderHistory, folder]);
+    else await window.workbench?.openPath(file.path);
+  }
+
+  const searchableTasks = useMemo(
+    () => (searchOpen ? taskCollection(state, today) : []),
+    [searchOpen, state, today],
+  );
   async function restoreFromBackup() {
     if (!window.workbench || importing.current) return false;
     importing.current = true;
@@ -259,6 +446,7 @@ export default function App() {
             : restored.settings.breakMinutes) * 60,
         );
       setEditingNote(null);
+      setNoteText("");
       setNoteTagIds([]);
       setError("");
       setReady(true);
@@ -378,9 +566,12 @@ export default function App() {
   const toggle = (t: Task) =>
     change((s) => ({ ...s, tasks: toggleTaskDone(s.tasks, t.id, !t.done) }));
   const remove = (t: Task) => {
+    const series = state.tasks.find(
+      (task) => task.id === taskTemplateId(t.id) && task.repeat !== "none",
+    );
     if (
       !confirm(
-        `删除“${t.title}”？${t.repeat !== "none" || t.id.includes("::") ? "这将删除此重复待办及其记录。" : ""}`,
+        `删除“${t.title}”？${series ? "这将删除此重复待办及其记录。" : ""}`,
       )
     )
       return;
@@ -654,12 +845,13 @@ export default function App() {
             <span>WORKBENCH</span>
           </div>
         </div>
-        <div className="workspace-label">我的日常，有条不紊</div>
+        <div className="workspace-label">工作空间</div>
         <nav>
           {nav.map((item) => (
             <button
               key={item.id}
               className={`nav-item ${view === item.id ? "active" : ""}`}
+              aria-current={view === item.id ? "page" : undefined}
               onClick={() => setView(item.id)}
             >
               <item.icon size={19} strokeWidth={1.7} />
@@ -706,7 +898,7 @@ export default function App() {
           <div className="little-clock">
             <div>
               <Clock3 size={15} />
-              <span>此刻，慢慢来</span>
+              <span>本地时间</span>
             </div>
             <strong>
               {now.toLocaleTimeString("zh-CN", {
@@ -736,14 +928,41 @@ export default function App() {
       <main className={`main ${view === "today" ? "workbench-home" : ""}`}>
         <header className="titlebar">
           <div className="breadcrumb">
-            我的空间<span>/</span>
+            花笺<span>/</span>
             {nav.find((n) => n.id === view)?.label}
           </div>
+          <button
+            className="workspace-search"
+            type="button"
+            aria-label="搜索工作台"
+            onClick={(event) => {
+              dialogTrigger.current = event.currentTarget;
+              setSearchOpen(true);
+            }}
+          >
+            <Search size={16} />
+            <span>搜索工作台</span>
+            <kbd>Ctrl K</kbd>
+          </button>
           <div className="titlebar-right">
-            <span className="local-status">
-              <i />
-              本地已就绪
-            </span>
+            <button
+              className={`update-trigger icon-button ${updateInfo.status === "ready" ? "update-ready" : ""}`}
+              type="button"
+              title={
+                updateInfo.status === "ready"
+                  ? `v${updateInfo.availableVersion} 可安装`
+                  : "应用更新"
+              }
+              aria-label="应用更新"
+              onClick={(event) => {
+                dialogTrigger.current = event.currentTarget;
+                setUpdateError("");
+                setUpdateOpen(true);
+              }}
+            >
+              <RefreshCw size={16} />
+              {updateInfo.status === "ready" && <span>有新版</span>}
+            </button>
             <button
               aria-label="置顶工作台"
               className="icon-button"
@@ -777,30 +996,34 @@ export default function App() {
         </header>
         <div className="page-content">
           <div className="page-heading">
-            <div>
-              <div className="eyebrow">
-                {view === "today"
-                  ? "A LITTLE ORDER, A LITTLE JOY"
-                  : "YOUR OWN LITTLE SPACE"}
+            <div className="page-heading-copy">
+              {view === "today" && (
+                <span className="today-emblem" aria-hidden="true">
+                  <Flower2 size={25} strokeWidth={1.6} />
+                </span>
+              )}
+              <div>
+                <h1>
+                  {view === "today"
+                    ? `${now.getHours() < 11 ? "早上好" : now.getHours() < 14 ? "中午好" : now.getHours() < 18 ? "下午好" : "晚上好"}${state.settings.name ? `，${state.settings.name}` : ""}`
+                    : nav.find((n) => n.id === view)?.label}
+                </h1>
+                {view === "today" && (
+                  <p className="today-description">
+                    <time dateTime={today}>
+                      {now.toLocaleDateString("zh-CN", {
+                        month: "long",
+                        day: "numeric",
+                        weekday: "long",
+                      })}
+                    </time>
+                    <span aria-hidden="true">·</span>
+                    <span>{dayInfo.reason}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{dayInfo.lunar}</span>
+                  </p>
+                )}
               </div>
-              <h1>
-                {view === "today"
-                  ? `${now.getHours() < 11 ? "早上好" : now.getHours() < 14 ? "中午好" : now.getHours() < 18 ? "下午好" : "晚上好"}${state.settings.name ? `，${state.settings.name}` : "，今天也从容一点"}`
-                  : nav.find((n) => n.id === view)?.label}
-                <span className="heading-dot">.</span>
-              </h1>
-              <p>
-                {
-                  {
-                    today: `${now.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })} · ${dayInfo.reason} · ${dayInfo.lunar}`,
-                    calendar: "每一个值得记住的日子，都有自己的位置。",
-                    tasks: "大事拆小，逐个完成。",
-                    notes: "灵感不必完整，先记下来就很好。",
-                    review: "回头看看，也给下周留一点余地。",
-                    files: "常用文件放在手边，寻找少绕一点路。",
-                  }[view]
-                }
-              </p>
             </div>
             <button className="primary-button" onClick={() => createTask()}>
               <Plus size={17} />
@@ -853,7 +1076,7 @@ export default function App() {
                   </button>
                 </div>
                 <button
-                  className="text-button"
+                  className="week-progress-button"
                   onClick={() => {
                     setReviewDate(visibleWeek);
                     setAiText("");
@@ -861,7 +1084,15 @@ export default function App() {
                   }}
                 >
                   <ChartNoAxesCombined size={15} />
-                  查看此周复盘 · {dashboardStats.completed}/{dashboardStats.total} 已完成
+                  <span>查看此周复盘</span>
+                  <progress
+                    max={dashboardStats.total || 1}
+                    value={dashboardStats.completed}
+                    aria-label="所选周完成进度"
+                  />
+                  <strong>
+                    {dashboardStats.completed}/{dashboardStats.total}
+                  </strong>
                 </button>
               </div>
               <form
@@ -918,6 +1149,7 @@ export default function App() {
                   tasks={state.tasks}
                   settings={state.settings}
                   onTaskClick={setTaskModal}
+                  onTaskToggle={toggle}
                   onDayClick={createTask}
                 />
                 <aside className="week-sidebar" aria-label="待办与便笺">
@@ -982,11 +1214,7 @@ export default function App() {
                             className={`recent-note ${note.color}`}
                             key={note.id}
                             onClick={() => {
-                              setNoteText(note.text);
-                              setNoteColor(note.color);
-                              setNoteTagIds(note.tagIds);
-                              setEditingNote(note.id);
-                              setView("notes");
+                              if (editNote(note)) setView("notes");
                             }}
                           >
                             {note.text}
@@ -1013,7 +1241,7 @@ export default function App() {
                     <div className="card-heading">
                       <h2>
                         <span className="tomato-dot" />
-                        留一段专注时间
+                        番茄钟
                       </h2>
                       <Coffee size={17} />
                     </div>
@@ -1246,12 +1474,7 @@ export default function App() {
               change={change}
               composer={noteComposer(true)}
               tell={tell}
-              onEdit={(note) => {
-                setNoteText(note.text);
-                setNoteColor(note.color);
-                setNoteTagIds(note.tagIds);
-                setEditingNote(note.id);
-              }}
+              onEdit={editNote}
               onPin={(note) =>
                 run(async () => {
                   if (!window.workbench) throw new Error("请在桌面版置顶便笺");
@@ -1302,6 +1525,7 @@ export default function App() {
                 </div>
                 <ReviewTools
                   selectedDate={reviewDate}
+                  disabled={aiBusy}
                   state={state}
                   onSelectDate={(date) => {
                     if (!aiBusy) {
@@ -1496,10 +1720,7 @@ export default function App() {
                       if (!window.workbench)
                         throw new Error("请在桌面版选择本地文件夹");
                       const p = await window.workbench.selectFolder();
-                      if (p) {
-                        setFolder(p);
-                        setFiles(await window.workbench.listFiles(p));
-                      }
+                      if (p) await browseFolder(p, []);
                     })
                   }
                 >
@@ -1510,6 +1731,23 @@ export default function App() {
               {folder ? (
                 <>
                   <div className="folder-path">
+                    {folderHistory.length > 0 && (
+                      <button
+                        className="icon-button"
+                        type="button"
+                        aria-label="返回上一级文件夹"
+                        onClick={() =>
+                          run(() =>
+                            browseFolder(
+                              folderHistory.at(-1)!,
+                              folderHistory.slice(0, -1),
+                            ),
+                          )
+                        }
+                      >
+                        <ChevronLeft size={17} />
+                      </button>
+                    )}
                     <FolderOpen size={16} />
                     {folder}
                     <button
@@ -1517,7 +1755,7 @@ export default function App() {
                       aria-label="刷新文件夹"
                       onClick={() =>
                         run(async () => {
-                          setFiles(await window.workbench!.listFiles(folder));
+                          await browseFolder(folder, folderHistory, true);
                         })
                       }
                     >
@@ -1547,22 +1785,12 @@ export default function App() {
                         <button
                           className="file-entry"
                           key={f.path}
-                          onDoubleClick={() =>
-                            run(async () => {
-                              if (f.isDirectory) {
-                                setFiles(
-                                  await window.workbench!.listFiles(f.path),
-                                );
-                                setFolder(f.path);
-                                setFileFilter("全部");
-                              } else await window.workbench?.openPath(f.path);
-                            })
-                          }
+                          onDoubleClick={() => run(() => openFileEntry(f))}
                           onKeyDown={(e) => {
-                            if (e.key === "Enter")
-                              void run(async () =>
-                                window.workbench?.openPath(f.path),
-                              );
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              void run(() => openFileEntry(f));
+                            }
                           }}
                         >
                           <span
@@ -1604,6 +1832,49 @@ export default function App() {
           )}
         </div>
       </main>
+      {searchOpen && (
+        <WorkspaceSearch
+          tasks={searchableTasks}
+          notes={state.notes}
+          close={closeAuxiliaryDialog}
+          selectTask={(task) => {
+            setSearchOpen(false);
+            setTaskModal(task);
+          }}
+          selectNote={(note) => {
+            if (editNote(note)) {
+              setSearchOpen(false);
+              setView("notes");
+              requestAnimationFrame(() =>
+                document
+                  .querySelector<HTMLTextAreaElement>(
+                    ".notes-workspace textarea",
+                  )
+                  ?.focus(),
+              );
+            }
+          }}
+        />
+      )}
+      {updateOpen && (
+        <UpdateDialog
+          status={updateInfo}
+          pending={updatePending}
+          error={updateError}
+          close={closeAuxiliaryDialog}
+          check={() => {
+            if (window.workbench)
+              void runUpdateAction(() => window.workbench!.checkUpdate());
+          }}
+          install={() => void installAvailableUpdate()}
+          setAutomatic={(enabled) => {
+            if (window.workbench)
+              void runUpdateAction(() =>
+                window.workbench!.setAutomaticUpdates(enabled),
+              );
+          }}
+        />
+      )}
       {toast && (
         <div className="toast" role="status">
           <Check size={17} />
@@ -1629,19 +1900,28 @@ export default function App() {
             setTaskDateOverride(null);
           }}
           save={(tasks) => {
-            change((s) => {
-              const ids = new Set(tasks.map((t) => t.id));
-              return {
-                ...s,
-                tasks: [...s.tasks.filter((t) => !ids.has(t.id)), ...tasks],
-              };
-            });
+            const updated = upsertTasks(
+              state.tasks,
+              tasks,
+              today,
+              taskModal === "new"
+                ? undefined
+                : { expectedExistingIds: [taskModal.id] },
+            );
+            const savedTask = updated.find((task) => task.id === tasks[0]?.id);
+            change((s) => ({ ...s, tasks: updated }));
+            if (taskModal === "new" && tasks[0]?.date && view === "today") {
+              const targetWeek = weekStart(tasks[0].date);
+              setDashboardWeek(targetWeek === currentWeek ? null : targetWeek);
+            }
             setTaskModal(null);
             setTaskDateOverride(null);
             tell(
               tasks.length > 1
                 ? `已安排 ${tasks.length} 个工作日步骤`
-                : "待办已保存",
+                : savedTask && savedTask.date !== tasks[0]?.date
+                  ? `旧周安排已保留，新计划从 ${savedTask.date} 生效`
+                  : "待办已保存",
             );
           }}
         />
@@ -1717,6 +1997,7 @@ function TaskRow({
               className="step-toggle"
               aria-label="展开任务步骤"
               onClick={() => setExpanded(!expanded)}
+              aria-expanded={expanded}
             >
               {t.steps.filter((s) => s.done).length}/{t.steps.length}
               {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
@@ -1774,7 +2055,7 @@ function TaskModal({
   const [repeat, setRepeat] = useState<Task["repeat"]>(
     existing?.repeat || "none",
   );
-  const [estimate, setEstimate] = useState(existing?.estimate || 25);
+  const [estimate, setEstimate] = useState(existing?.estimate ?? 25);
   const [reminder, setReminder] = useState(existing?.reminder || false);
   const [steps, setSteps] = useState(
     existing?.steps.map((s) => s.title).join("\n") || "",
@@ -1793,8 +2074,7 @@ function TaskModal({
       >
         <div className="modal-heading">
           <div>
-            <span className="eyebrow">ONE LITTLE STEP</span>
-            <h2>{existing ? "编辑这件小事" : "把计划，写下来"}</h2>
+            <h2>{existing ? "编辑待办" : "新建待办"}</h2>
           </div>
           <button className="icon-button" aria-label="关闭" onClick={close}>
             <X size={20} />
@@ -1859,15 +2139,13 @@ function TaskModal({
                   done: existing?.done || false,
                   completedAt: existing?.completedAt,
                   createdAt: existing?.createdAt || new Date().toISOString(),
-                  steps: steps
-                    .split("\n")
-                    .map((s) => s.trim())
-                    .filter(Boolean)
-                    .map((text, i) =>
-                      existing?.steps[i]?.title === text
-                        ? existing.steps[i]
-                        : { id: uid(), title: text, done: false },
-                    ),
+                  steps: reconcileTaskSteps(
+                    existing?.steps ?? [],
+                    steps
+                      .split("\n")
+                      .map((step) => step.trim())
+                      .filter(Boolean),
+                  ),
                   repeat: !due || existing?.id.includes("::") ? "none" : repeat,
                   estimate,
                   reminder: Boolean(due && time && reminder),
@@ -1960,9 +2238,9 @@ function TaskModal({
               预计用时（分钟）
               <input
                 type="number"
-                min={5}
-                max={100000}
-                step={5}
+                min={split ? 5 : 0}
+                max={Math.max(100000, existing?.estimate ?? 0)}
+                step="any"
                 value={estimate}
                 onChange={(e) => setEstimate(Number(e.target.value))}
               />
