@@ -25,7 +25,7 @@ GUID 与此前 appId 按 electron-builder 规则生成的身份一致。更改 a
 
 ## 自动更新与发布
 
-安装版从 1.2.0 起会在后台从本仓库 GitHub Release 检查、下载新版。更新器先用内置 Ed25519 公钥验证 `workbench-update.json`，再核对 Windows 安装包的长度和 SHA-256。选择「重启更新」后，工作台保存记录并退出，NSIS 沿用当前用户的安装路径重新打开应用。下载或校验失败时可重试，或使用发行页的安装包。
+安装版从 1.2.0 起会在后台从本仓库 GitHub Release 检查、下载新版。更新器先用内置 Ed25519 公钥验证 `workbench-update.json`，再核对 Windows 安装包的长度和 SHA-256。选择「重启更新」后，工作台保存记录并退出，NSIS 静默覆盖当前用户的原安装路径；安装助手等待安装结束、核对新版程序版本并以正常窗口方式重新启动应用。下载或校验失败时可重试，或使用发行页的安装包。
 
 正式发布由 [Publish signed Windows release](../.github/workflows/release.yml) 从 main 手动触发，或由 Agent 提交明确的发行请求文件触发。它先运行完整 Windows CI，再使用同一运行中的产物进入 production 签名任务。签名、暂存发行和核对全部资产后才公开 Release。参见 [发行配置](RELEASE-AUTOMATION.md)。
 

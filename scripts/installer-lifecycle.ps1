@@ -124,6 +124,13 @@ function Wait-UpdatedApplication {
     }
     Start-Sleep -Milliseconds 200
   }
+  $report.restartDiagnostics = [ordered]@{
+    registration = @(Get-InstallRecords)
+    installedVersion = if (Test-Path -LiteralPath $expectedExe) { [Diagnostics.FileVersionInfo]::GetVersionInfo($expectedExe).ProductVersion } else { 'missing' }
+    processes = @(Get-CimInstance Win32_Process -Filter "name='Workbench.exe'" | Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine)
+  }
+  $lastError = Join-Path $profilePath 'updates\last-update-error.txt'
+  if (Test-Path -LiteralPath $lastError) { $report.restartDiagnostics.helperError = Get-Content -LiteralPath $lastError -Raw }
   throw 'Updater did not restart the new installed application with a visible main window.'
 }
 function Stop-OwnRestartedApplication($Observed) {
@@ -196,6 +203,13 @@ try {
   $report.failure = $_.Exception.Message
   Write-Error $_ -ErrorAction Continue
 } finally {
+  # Collect the helper's output even if the old app exited successfully but restart failed.
+  $updateDirectory = Join-Path $profilePath 'updates'
+  if ($UseUpdater -and (Test-Path -LiteralPath $updateDirectory)) {
+    foreach ($log in @(Get-ChildItem -LiteralPath $updateDirectory -Filter 'handoff-*.log' -File)) {
+      try { Copy-Item -LiteralPath $log.FullName -Destination $evidencePath -Force; Write-Host ("Updater helper log: "+$log.Name); Get-Content -LiteralPath $log.FullName | Write-Host } catch { Write-Host 'Could not read helper diagnostic log.' }
+    }
+  }
   if ($didInstall) { try { Uninstall-OwnTest } catch { $report.cleanupFailure = $_.Exception.Message } }
   foreach ($link in $linkBackups) {
     if ($link.Existed) { Copy-Item -LiteralPath $link.Backup -Destination $link.Path -Force }

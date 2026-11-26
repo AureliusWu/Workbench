@@ -116,44 +116,78 @@ async function detectInstalled({platform=process.platform,isPackaged,executable=
   return {enabled:true,reason:'',directory,uninstaller};
 }
 function encodedPath(value){return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(value,'utf8').toString('base64')}'))`;}
-function handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256,size}){
+function handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256,size,expectedVersion}){
   if(!Number.isSafeInteger(parentPid)||parentPid<1||!/^[a-f0-9]{64}$/.test(sha256)||!Number.isSafeInteger(size)||size<1)throw new Error('更新交接参数无效。');
+  stableVersion(expectedVersion);
   return `$ErrorActionPreference='Stop'
 $installer=${encodedPath(installer)}
 $application=${encodedPath(executable)}
 $ready=${encodedPath(readyFile)}
 $cancel=${encodedPath(cancelFile)}
 $failure=${encodedPath(errorFile)}
-function Start-HiddenProcess([string]$file,[string]$arguments) {
+function Write-Phase([string]$message) {
+  [Console]::WriteLine([DateTime]::UtcNow.ToString('o')+' '+$message)
+}
+function Start-UpdateProcess([string]$file,[string]$arguments,[bool]$hidden) {
   $info=[Diagnostics.ProcessStartInfo]::new()
   $info.FileName=$file
   $info.Arguments=$arguments
+  $info.WorkingDirectory=[IO.Path]::GetDirectoryName($file)
   $info.UseShellExecute=$false
-  $info.CreateNoWindow=$true
-  $info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+  $info.CreateNoWindow=$hidden
+  if ($hidden) { $info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden }
+  else { $info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Normal }
+  # Do not inherit Electron/Node debugger mode from the exiting app or its test harness.
+  foreach ($name in @('ELECTRON_RUN_AS_NODE','NODE_OPTIONS','ELECTRON_NO_ATTACH_CONSOLE')) { $info.EnvironmentVariables.Remove($name) }
   return [Diagnostics.Process]::Start($info)
 }
 $parent=$null
 try {
+  Write-Phase "helper-start pid=$PID"
   if (![IO.File]::Exists($installer)) { throw '更新安装包已丢失。' }
   try { $parent=[Diagnostics.Process]::GetProcessById(${parentPid}) } catch [ArgumentException] {}
   if ($null -eq $parent) { throw '工作台进程在交接前已退出。' }
   [IO.File]::WriteAllText($ready,'ready')
+  Write-Phase 'ready'
   if (!$parent.WaitForExit(60000)) { throw '工作台尚未退出，已取消安装。' }
-  if ([IO.File]::Exists($cancel)) { exit 0 }
+  Write-Phase 'parent-exited'
+  if ([IO.File]::Exists($cancel)) { Write-Phase 'cancelled'; exit 0 }
   if ([IO.FileInfo]::new($installer).Length -ne ${size}) { throw '更新安装包大小校验失败。' }
   $hashAlgorithm=[Security.Cryptography.SHA256]::Create()
   $stream=[IO.File]::OpenRead($installer)
   try { $actualHash=[BitConverter]::ToString($hashAlgorithm.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
   finally { $stream.Dispose(); $hashAlgorithm.Dispose() }
   if ($actualHash -ne '${sha256}') { throw '更新安装包校验失败。' }
-  $process=Start-HiddenProcess $installer '/S --updated --force-run'
+  Write-Phase 'installer-verified'
+  # Silent NSIS must not auto-launch; restart explicitly after the install exits.
+  $process=Start-UpdateProcess $installer '/S --updated' $true
+  Write-Phase ("installer-started pid="+$process.Id)
   $process.WaitForExit()
-  if ($process.ExitCode -ne 0) { throw ('安装未完成，退出码：'+$process.ExitCode) }
+  $code=$process.ExitCode
   $process.Dispose()
+  Write-Phase ("installer-exited code="+$code)
+  if ($code -ne 0) { throw ('安装未完成，退出码：'+$code) }
+  if (![IO.File]::Exists($application)) { throw '安装完成后找不到工作台程序。' }
+  $installedVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($application).ProductVersion
+  Write-Phase ("installed-version="+$installedVersion)
+  if ($installedVersion -ne '${expectedVersion}') { throw ('更新后版本不匹配：'+$installedVersion) }
+  $restarted=Start-UpdateProcess $application '' $false
+  Write-Phase ("application-started pid="+$restarted.Id)
+  if ($restarted.WaitForExit(1500)) {
+    $restartCode=$restarted.ExitCode
+    $restarted.Dispose()
+    throw ('新版工作台启动后退出，退出码：'+$restartCode)
+  }
+  $restarted.Dispose()
+  Write-Phase 'restart-dispatched'
 } catch {
+  Write-Phase ('failure: '+$_.Exception.Message)
   [IO.File]::WriteAllText($failure,('自动更新未完成：'+$_.Exception.Message))
-  if ($null -ne $parent -and $parent.HasExited -and ![IO.File]::Exists($cancel) -and [IO.File]::Exists($application)) { [void](Start-HiddenProcess $application '') }
+  # Recover the existing installation if possible, once, without forcing any process to exit.
+  if ($null -ne $parent -and $parent.HasExited -and ![IO.File]::Exists($cancel) -and [IO.File]::Exists($application)) {
+    try { $recovery=Start-UpdateProcess $application '' $false; Write-Phase ("recovery-started pid="+$recovery.Id); $recovery.Dispose() }
+    catch { Write-Phase ('recovery-failed: '+$_.Exception.Message) }
+  }
   exit 1
 } finally {
   if ($null -ne $parent) { $parent.Dispose() }
@@ -163,7 +197,7 @@ try {
 async function launchInstaller({installer,manifest,cacheDirectory,executable=process.execPath,parentPid=process.pid,spawnImpl=spawn}){
   const token=crypto.randomUUID(),readyFile=path.join(cacheDirectory,`handoff-${token}.ready`),cancelFile=path.join(cacheDirectory,`handoff-${token}.cancel`),errorFile=path.join(cacheDirectory,'last-update-error.txt'),scriptFile=path.join(cacheDirectory,`handoff-${token}.ps1`);
   await fsp.unlink(errorFile).catch(()=>{});
-  const script=handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256:manifest.sha256,size:manifest.size});
+  const script=handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256:manifest.sha256,size:manifest.size,expectedVersion:manifest.version});
   const powershell=path.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
   let child,exitCode,exited=false;
   const diagnosticFile=path.join(cacheDirectory,`handoff-${token}.log`);
@@ -171,11 +205,11 @@ async function launchInstaller({installer,manifest,cacheDirectory,executable=pro
   try{
     // Windows PowerShell 5.1 requires a BOM for UTF-8 source containing non-ASCII.
     // Use -File instead of an encoded command or hidden/detached console flags.
-    // The helper is generated locally, never downloaded; Windows child processes
-    // are independent of their parent's lifetime. No inherited console or pipes.
+    // The helper is generated locally, never downloaded. Detach it from the
+    // Electron parent and keep its output in a file, not an inherited pipe.
     await fsp.writeFile(scriptFile,'\uFEFF'+script,{flag:'wx',mode:0o600});
     diagnostic=await fsp.open(diagnosticFile,'wx',0o600);
-    child=spawnImpl(powershell,['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptFile],{windowsHide:true,stdio:['ignore',diagnostic.fd,diagnostic.fd]});
+    child=spawnImpl(powershell,['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptFile],{windowsHide:true,detached:true,stdio:['ignore',diagnostic.fd,diagnostic.fd]});
     child.once('exit',(code)=>{exited=true;exitCode=code;});
     await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});
     child.unref();

@@ -22,7 +22,7 @@ test('actual Windows PowerShell handoff signals readiness and honors cancellatio
   const parent=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:'ignore'});
   try{
     await once(parent,'spawn');
-    const result=await updater.launchInstaller({installer,manifest:{size:payload.length,sha256:crypto.createHash('sha256').update(payload).digest('hex')},cacheDirectory:directory,executable:process.execPath,parentPid:parent.pid});
+    const result=await updater.launchInstaller({installer,manifest:{version:'1.2.0',size:payload.length,sha256:crypto.createHash('sha256').update(payload).digest('hex')},cacheDirectory:directory,executable:process.execPath,parentPid:parent.pid});
     assert.equal(parent.exitCode,null);
     assert.equal(parent.signalCode,null);
     await fs.writeFile(result.cancelFile,'cancel');
@@ -30,6 +30,9 @@ test('actual Windows PowerShell handoff signals readiness and honors cancellatio
     await until(async()=>{try{await fs.access(result.scriptFile);return false;}catch{return true;}});
     await assert.rejects(fs.access(path.join(directory,'last-update-error.txt')));
     assert.equal((await fs.readFile(installer)).equals(payload),true);
+    const log=await fs.readFile(result.diagnosticFile,'utf8');
+    assert.match(log,/helper-start/);assert.match(log,/parent-exited/);assert.match(log,/cancelled/);
+    assert.doesNotMatch(log,/installer-started/);
   }finally{
     if(parent.exitCode===null&&parent.signalCode===null){parent.kill();await once(parent,'exit').catch(()=>{});}
     await fs.rm(directory,{recursive:true,force:true,maxRetries:10,retryDelay:100});
