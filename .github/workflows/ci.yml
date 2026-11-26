@@ -25,6 +25,7 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm run test:native
+      - run: node --test scripts/sign-update-test.cjs
       - run: npm run test:e2e
         env:
           WORKBENCH_E2E_CAPTURE: '0'

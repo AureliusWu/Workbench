@@ -1,6 +1,9 @@
 name: Publish signed Windows release
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/release-request.json']
 
 permissions:
   contents: read
@@ -56,6 +59,10 @@ jobs:
           releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
           if grep -Fxq "v$version" <<< "$releases"; then echo "Release already exists"; exit 1; fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Verify explicit release request on push
+        if: github.event_name == 'push'
+        run: |
+          node -e 'const r=require("./.github/release-request.json");if(r.version!==process.env.VERSION||!Number.isSafeInteger(r.attempt)||r.attempt<1)throw Error("Release request must match package version and contain a positive attempt");'
       - name: Sign tested installer
         shell: bash
         env:
