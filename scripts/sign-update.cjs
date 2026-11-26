@@ -44,9 +44,29 @@ if ($env:WORKBENCH_RELEASE_SIGNER_MODE -eq 'create') {
 }
 
 function readKey() {
-  const bytes = protectedPrivateKey('read');
-  try { return crypto.createPrivateKey({ key: bytes, format: 'der', type: 'pkcs8' }); }
+  const fromCI = process.env.GITHUB_ACTIONS === 'true';
+  const encoded = process.env.WORKBENCH_UPDATE_PRIVATE_KEY;
+  if (fromCI && !encoded) throw new Error('production signing secret is missing.');
+  const bytes = encoded ? Buffer.from(encoded, 'base64') : protectedPrivateKey('read');
+  delete process.env.WORKBENCH_UPDATE_PRIVATE_KEY;
+  try {
+    const key = crypto.createPrivateKey({ key: bytes, format: 'der', type: 'pkcs8' });
+    if (key.asymmetricKeyType !== 'ed25519') throw new Error('Expected Ed25519 signing key.');
+    return key;
+  } catch { throw new Error('Invalid signing key; expected base64 PKCS#8 DER Ed25519.'); }
   finally { bytes.fill(0); }
+}
+
+function configureCI() {
+  if (process.env.GITHUB_ACTIONS === 'true') throw new Error('Configure the secret from a trusted owner-controlled device only.');
+  const key = readKey();
+  const fingerprint = assertTrusted(key);
+  const bytes = key.export({format:'der',type:'pkcs8'});
+  try {
+    const result = spawnSync('gh', ['secret','set','WORKBENCH_UPDATE_PRIVATE_KEY','--repo','AureliusWu/Workbench','--env','production'], {input:bytes.toString('base64'), encoding:'utf8', windowsHide:true, timeout:60000, stdio:['pipe','ignore','ignore']});
+    if(result.error || result.status !== 0) throw new Error('Could not configure the production secret. Verify gh auth and environment permissions.');
+    console.log(`Configured production secret for public key SHA-256 ${fingerprint}`);
+  } finally { bytes.fill(0); }
 }
 
 function assertTrusted(key) {
@@ -103,6 +123,7 @@ async function signUpdate(installer, output) {
 async function main() {
   const [installer, output] = process.argv.slice(2);
   if (installer === '--init') initialize();
+  else if (installer === '--configure-ci') configureCI();
   else if (installer && output) await signUpdate(installer, output);
   else throw new Error('Use --init once, or pass the verified installer and workbench-update.json output path.');
 }

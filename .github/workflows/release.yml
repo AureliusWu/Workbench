@@ -1,0 +1,85 @@
+name: Publish signed Windows release
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workbench-production-release
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish:
+    needs: quality
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          name: Workbench-installer-windows-x64
+          path: release
+      - name: Validate tested artifact and release identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test -f "docs/RELEASE-V$version.md"
+          test -f "release/Workbench-Setup-$version-win-x64.exe"
+          (cd release && sha256sum --check SHA256SUMS.txt)
+          node scripts/update-manifest.cjs "release/Workbench-Setup-$version-win-x64.exe" release/recomputed.json
+          cmp release/recomputed.json release/workbench-update.unsigned.json
+          # Fail closed on existing tags/releases or inaccessible repository.
+          gh api "repos/$GITHUB_REPOSITORY" --jq .full_name >/dev/null
+          tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name')
+          if grep -Fxq "v$version" <<< "$tags"; then echo "Release tag already exists"; exit 1; fi
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
+          if grep -Fxq "v$version" <<< "$releases"; then echo "Release already exists"; exit 1; fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Sign tested installer
+        shell: bash
+        env:
+          WORKBENCH_UPDATE_PRIVATE_KEY: ${{ secrets.WORKBENCH_UPDATE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          node scripts/sign-update.cjs "release/Workbench-Setup-$VERSION-win-x64.exe" release/workbench-update.json
+      - name: Stage draft with all required assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --title "花笺 Workbench v$VERSION" --notes-file "docs/RELEASE-V$VERSION.md" "release/Workbench-Setup-$VERSION-win-x64.exe" release/SHA256SUMS.txt release/workbench-update.json
+      - name: Verify staged assets and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft,assets > staged.json
+          node -e 'const r=require("./staged.json");const expected=["Workbench-Setup-"+process.env.VERSION+"-win-x64.exe","SHA256SUMS.txt","workbench-update.json"].sort();if(!r.isDraft||JSON.stringify(r.assets.map(a=>a.name).sort())!==JSON.stringify(expected))process.exit(1);'
+          mkdir staged
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --dir staged
+          for file in "Workbench-Setup-$VERSION-win-x64.exe" SHA256SUMS.txt workbench-update.json; do cmp "release/$file" "staged/$file"; done
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json url,isDraft,tagName,assets

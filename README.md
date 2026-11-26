@@ -8,7 +8,7 @@
 
 ## 下载与运行
 
-到 [Releases](https://github.com/AureliusWu/Workbench/releases) 下载 `Workbench-Setup-1.2.0-win-x64.exe`，双击后自动安装并打开工作台，无需安装 Node.js 或浏览器。安装在当前 Windows 用户下，默认程序位置为 `%LOCALAPPDATA%\Programs\Workbench`，创建“花笺 Workbench”桌面及开始菜单快捷方式。
+当前开发目标为 1.2.0；实际已发布版本以 [Releases](https://github.com/AureliusWu/Workbench/releases) 为准。下载其中最新正式版的 `Workbench-Setup-版本号-win-x64.exe`，双击后自动安装并打开工作台，无需安装 Node.js 或浏览器。安装在当前 Windows 用户下，默认程序位置为 `%LOCALAPPDATA%\Programs\Workbench`，创建“花笺 Workbench”桌面及开始菜单快捷方式。
 
 以后下载新版 `Workbench-Setup-版本号-win-x64.exe` 再次打开，安装程序会识别同一份已安装程序并更新。任务、便笺、复盘、设置与本机加密密钥保存在独立数据目录，安装和正常卸载均保留这些记录。更新前可以先在设置中导出一份备份。
 

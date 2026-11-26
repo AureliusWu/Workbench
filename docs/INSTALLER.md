@@ -27,6 +27,8 @@ GUID 与此前 appId 按 electron-builder 规则生成的身份一致。更改 a
 
 安装版从 1.2.0 起会在后台从本仓库 GitHub Release 检查、下载新版。更新器先用内置 Ed25519 公钥验证 `workbench-update.json`，再核对 Windows 安装包的长度和 SHA-256。选择「重启更新」后，工作台保存记录并退出，NSIS 沿用当前用户的安装路径重新打开应用。下载或校验失败时可重试，或使用发行页的安装包。
 
+正式发布由 [Publish signed Windows release](../.github/workflows/release.yml) 从 main 手动触发。它先运行完整 Windows CI，再使用同一运行中的产物进入 production 签名任务。签名、暂存发行和核对全部资产后才公开 Release。参见 [发行配置](RELEASE-AUTOMATION.md)。
+
 发布时使用通过 Windows CI 生命周期测试的同一份安装包。`workbench-update.unsigned.json` 是 CI 生成的版本、文件名、长度与 SHA-256 记录，需与下载的安装包匹配。下面的命令在持有本地签名密钥的 Windows 用户下生成最终清单。
 
 ```powershell
@@ -35,7 +37,7 @@ node scripts/sign-update.cjs release/v1.2.0/Workbench-Setup-1.2.0-win-x64.exe re
 
 一起上传安装包、`SHA256SUMS.txt`、`workbench-update.json` 到同一个稳定发行版。发布后检查公开的 `releases/latest/download/workbench-update.json`，并用 `electron/update-public-key.pem` 校验内容与安装包。
 
-私钥由 Windows 当前用户 DPAPI 保护，存放在 `%LOCALAPPDATA%\WorkbenchReleaseSigning\update-ed25519.dpapi`。仓库与 CI 只持有公钥。保留这份受保护的密钥及其 Windows 账户，后续版本才能为现有安装签名。若密钥不可用，已有用户需手动安装包含新公钥的受信任发行版。
+私钥由 Windows 当前用户 DPAPI 保护，存放在 `%LOCALAPPDATA%\WorkbenchReleaseSigning\update-ed25519.dpapi`。仓库与普通 CI 只持有公钥；production 环境 Secret 可托管同一私钥以供发行任务使用。保留受保护的离线备份，避免丢失更新信任链。若密钥不可用，已有用户需手动安装包含新公钥的受信任发行版。
 
 ## 安装生命周期验证
 

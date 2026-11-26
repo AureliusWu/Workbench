@@ -124,25 +124,39 @@ $application=${encodedPath(executable)}
 $ready=${encodedPath(readyFile)}
 $cancel=${encodedPath(cancelFile)}
 $failure=${encodedPath(errorFile)}
+function Start-HiddenProcess([string]$file,[string]$arguments) {
+  $info=[Diagnostics.ProcessStartInfo]::new()
+  $info.FileName=$file
+  $info.Arguments=$arguments
+  $info.UseShellExecute=$false
+  $info.CreateNoWindow=$true
+  $info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+  return [Diagnostics.Process]::Start($info)
+}
+$parent=$null
 try {
-  if (!(Test-Path -LiteralPath $installer -PathType Leaf)) { throw '更新安装包已丢失。' }
-  Set-Content -LiteralPath $ready -Value 'ready' -Encoding Ascii
-  Wait-Process -Id ${parentPid} -Timeout 60 -ErrorAction SilentlyContinue
-  if (Test-Path -LiteralPath $cancel) { exit 0 }
-  if (Get-Process -Id ${parentPid} -ErrorAction SilentlyContinue) { throw '工作台尚未退出，已取消安装。' }
-  $item=Get-Item -LiteralPath $installer
-  if ($item.Length -ne ${size}) { throw '更新安装包大小校验失败。' }
+  if (![IO.File]::Exists($installer)) { throw '更新安装包已丢失。' }
+  try { $parent=[Diagnostics.Process]::GetProcessById(${parentPid}) } catch [ArgumentException] {}
+  if ($null -eq $parent) { throw '工作台进程在交接前已退出。' }
+  [IO.File]::WriteAllText($ready,'ready')
+  if (!$parent.WaitForExit(60000)) { throw '工作台尚未退出，已取消安装。' }
+  if ([IO.File]::Exists($cancel)) { exit 0 }
+  if ([IO.FileInfo]::new($installer).Length -ne ${size}) { throw '更新安装包大小校验失败。' }
   $hashAlgorithm=[Security.Cryptography.SHA256]::Create()
   $stream=[IO.File]::OpenRead($installer)
   try { $actualHash=[BitConverter]::ToString($hashAlgorithm.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
   finally { $stream.Dispose(); $hashAlgorithm.Dispose() }
   if ($actualHash -ne '${sha256}') { throw '更新安装包校验失败。' }
-  $process=Start-Process -FilePath $installer -ArgumentList @('/S','--updated','--force-run') -WindowStyle Hidden -PassThru -Wait
+  $process=Start-HiddenProcess $installer '/S --updated --force-run'
+  $process.WaitForExit()
   if ($process.ExitCode -ne 0) { throw ('安装未完成，退出码：'+$process.ExitCode) }
+  $process.Dispose()
 } catch {
-  Set-Content -LiteralPath $failure -Value ('自动更新未完成：'+$_.Exception.Message) -Encoding UTF8
-  if (!(Get-Process -Id ${parentPid} -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $application -PathType Leaf)) { Start-Process -FilePath $application -WindowStyle Hidden }
+  [IO.File]::WriteAllText($failure,('自动更新未完成：'+$_.Exception.Message))
+  if ($null -ne $parent -and $parent.HasExited -and ![IO.File]::Exists($cancel) -and [IO.File]::Exists($application)) { [void](Start-HiddenProcess $application '') }
   exit 1
+} finally {
+  if ($null -ne $parent) { $parent.Dispose() }
 }`;
 }
 async function launchInstaller({installer,manifest,cacheDirectory,executable=process.execPath,parentPid=process.pid,spawnImpl=spawn}){
@@ -150,9 +164,26 @@ async function launchInstaller({installer,manifest,cacheDirectory,executable=pro
   await fsp.unlink(errorFile).catch(()=>{});
   const script=handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256:manifest.sha256,size:manifest.size});
   const powershell=path.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
-  let child;try{child=spawnImpl(powershell,['-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,detached:true,stdio:'ignore'});await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});child.unref();}catch{throw new Error('无法启动更新安装程序，工作台会继续运行。');}
-  const deadline=Date.now()+10000;while(Date.now()<deadline){if(fs.existsSync(readyFile)){await fsp.unlink(readyFile).catch(()=>{});return;}if(fs.existsSync(errorFile))break;await new Promise(resolve=>setTimeout(resolve,50));}
-  await fsp.writeFile(cancelFile,'cancel','utf8');throw new Error('更新安装程序没有准备好，工作台会继续运行。');
+  let child,exitCode,exited=false;
+  const diagnosticFile=path.join(cacheDirectory,`handoff-${token}.log`);
+  let diagnostic;
+  try{
+    diagnostic=await fsp.open(diagnosticFile,'wx',0o600);
+    child=spawnImpl(powershell,['-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,detached:true,stdio:['ignore',diagnostic.fd,diagnostic.fd]});
+    child.once('exit',(code)=>{exited=true;exitCode=code;});
+    await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});
+    child.unref();
+  }catch{throw new Error('无法启动更新安装程序，工作台会继续运行。');}
+  finally{await diagnostic?.close().catch(()=>{});}
+  const deadline=Date.now()+30000;
+  while(Date.now()<deadline){
+    if(fs.existsSync(errorFile)||exited)break;
+    if(fs.existsSync(readyFile)){await fsp.unlink(readyFile).catch(()=>{});return;}
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  await fsp.writeFile(cancelFile,'cancel','utf8');
+  const detail=await fsp.readFile(errorFile,'utf8').catch(()=>fsp.readFile(diagnosticFile,'utf8').catch(()=>''));
+  throw new Error(`更新安装程序没有准备好，工作台会继续运行。${detail.trim().slice(0,240)|| (exited?` (exit ${exitCode})`:'')}`);
 }
 function loadPreference(file){try{const value=JSON.parse(fs.readFileSync(file,'utf8'));return typeof value.automatic==='boolean'?value.automatic:true;}catch{return true;}}
 async function persistPreference(file,automatic){await fsp.mkdir(path.dirname(file),{recursive:true});const temporary=`${file}.tmp`;const handle=await fsp.open(temporary,'w',0o600);try{await handle.writeFile(JSON.stringify({automatic}));await handle.sync();}finally{await handle.close();}await fsp.rename(temporary,file);}
