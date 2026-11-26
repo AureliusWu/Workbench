@@ -157,10 +157,11 @@ try {
   exit 1
 } finally {
   if ($null -ne $parent) { $parent.Dispose() }
+  try { [IO.File]::Delete($MyInvocation.MyCommand.Path) } catch {}
 }`;
 }
 async function launchInstaller({installer,manifest,cacheDirectory,executable=process.execPath,parentPid=process.pid,spawnImpl=spawn}){
-  const token=crypto.randomUUID(),readyFile=path.join(cacheDirectory,`handoff-${token}.ready`),cancelFile=path.join(cacheDirectory,`handoff-${token}.cancel`),errorFile=path.join(cacheDirectory,'last-update-error.txt');
+  const token=crypto.randomUUID(),readyFile=path.join(cacheDirectory,`handoff-${token}.ready`),cancelFile=path.join(cacheDirectory,`handoff-${token}.cancel`),errorFile=path.join(cacheDirectory,'last-update-error.txt'),scriptFile=path.join(cacheDirectory,`handoff-${token}.ps1`);
   await fsp.unlink(errorFile).catch(()=>{});
   const script=handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256:manifest.sha256,size:manifest.size});
   const powershell=path.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
@@ -168,20 +169,30 @@ async function launchInstaller({installer,manifest,cacheDirectory,executable=pro
   const diagnosticFile=path.join(cacheDirectory,`handoff-${token}.log`);
   let diagnostic;
   try{
+    // Windows PowerShell 5.1 requires a BOM for UTF-8 source containing non-ASCII.
+    // Use -File instead of an encoded command or hidden/detached console flags.
+    // The helper is generated locally, never downloaded; Windows child processes
+    // are independent of their parent's lifetime. No inherited console or pipes.
+    await fsp.writeFile(scriptFile,'\uFEFF'+script,{flag:'wx',mode:0o600});
     diagnostic=await fsp.open(diagnosticFile,'wx',0o600);
-    child=spawnImpl(powershell,['-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,detached:true,stdio:['ignore',diagnostic.fd,diagnostic.fd]});
+    child=spawnImpl(powershell,['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptFile],{windowsHide:true,stdio:['ignore',diagnostic.fd,diagnostic.fd]});
     child.once('exit',(code)=>{exited=true;exitCode=code;});
     await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});
     child.unref();
-  }catch{throw new Error('无法启动更新安装程序，工作台会继续运行。');}
+  }catch{await fsp.unlink(scriptFile).catch(()=>{});throw new Error('无法启动更新安装程序，工作台会继续运行。');}
   finally{await diagnostic?.close().catch(()=>{});}
   const deadline=Date.now()+30000;
   while(Date.now()<deadline){
     if(fs.existsSync(errorFile)||exited)break;
-    if(fs.existsSync(readyFile)){await fsp.unlink(readyFile).catch(()=>{});return;}
+    if(fs.existsSync(readyFile)){
+      await fsp.unlink(readyFile).catch(()=>{});
+      // The script is already running and will clean up its own files.
+      return {cancelFile,diagnosticFile,scriptFile};
+    }
     await new Promise(resolve=>setTimeout(resolve,50));
   }
   await fsp.writeFile(cancelFile,'cancel','utf8');
+  if(exited)await fsp.unlink(scriptFile).catch(()=>{});
   const detail=await fsp.readFile(errorFile,'utf8').catch(()=>fsp.readFile(diagnosticFile,'utf8').catch(()=>''));
   throw new Error(`更新安装程序没有准备好，工作台会继续运行。${detail.trim().slice(0,240)|| (exited?` (exit ${exitCode})`:'')}`);
 }

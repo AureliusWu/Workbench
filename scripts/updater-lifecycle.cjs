@@ -167,6 +167,12 @@ async function main() {
 }
 main().catch(async error => {
   report.failure = error.stack || String(error);
+  const updates = path.join(profile,'updates');
+  try {
+    for(const name of fs.readdirSync(updates).filter(name=>/^handoff-[a-f0-9-]+\.log$/.test(name))){
+      fs.copyFileSync(path.join(updates,name),path.join(evidenceDir,name));
+    }
+  }catch{}
   if (page && !page.isClosed()) await page.screenshot({ path: path.join(evidenceDir, 'updater-failure.png'), fullPage: true }).catch(() => {});
   console.error(report.failure);
   process.exitCode = 1;

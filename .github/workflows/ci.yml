@@ -26,6 +26,8 @@ jobs:
       - run: npm test
       - run: npm run test:native
       - run: node --test scripts/sign-update-test.cjs
+      - name: Verify real Windows helper readiness and cancellation
+        run: node --test scripts/handoff-windows-test.cjs
       - run: npm run test:e2e
         env:
           WORKBENCH_E2E_CAPTURE: '0'
@@ -64,4 +66,5 @@ jobs:
             artifacts/**/updater-results.json
             artifacts/**/*.png
             artifacts/**/process.log
+            artifacts/**/handoff-*.log
           if-no-files-found: ignore
