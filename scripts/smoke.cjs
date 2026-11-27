@@ -457,6 +457,76 @@ async function testWorkspaceUpgrade() {
   measurements.workspaceUpgrade = { status: 'PASS', legacyStartupUnchanged: true, legacyImport: true, naturalTask: true, inlineCalendarCompletion: true, historicalMarkdown: true, tagsArchiveRestart: true, globalSearch: true, updateDialog: true, desktopViewport: '1366x768' };
 }
 
+async function testDayAgenda() {
+  const open = () => page.getByRole('button', { name: '两日清单', exact: true }).click();
+  const today = page.getByTestId('agenda-today');
+  const tomorrow = page.getByTestId('agenda-tomorrow');
+  const row = (panel, title) => panel.getByTestId('task-item').filter({ hasText: title });
+  const movingTitle = '核对下次会议资料';
+  const backlogTitle = '归类共享文件';
+  const templateTitle = '下月例会筹备';
+  const historical = (await loadState()).tasks.find(task => task.id === 'legacy-history');
+  assert.equal(historical.done, true);
+
+  await open();
+  const todayKey = await today.locator('time').getAttribute('datetime');
+  const tomorrowKey = await tomorrow.locator('time').getAttribute('datetime');
+  assert.ok(todayKey < tomorrowKey);
+  const todayInput = today.getByRole('textbox', { name: '今天待办名称' });
+  await todayInput.fill(movingTitle);
+  await todayInput.press('Enter');
+  const initial = await waitFor(async () => (await loadState()).tasks.find(task => task.title === movingTitle), 'agenda add persists');
+  assert.equal(initial.date, todayKey);
+  await row(today, movingTitle).getByRole('button', { name: `移到明天 ${movingTitle}`, exact: true }).click();
+  await row(tomorrow, movingTitle).waitFor();
+  assert.equal(await row(today, movingTitle).count(), 0);
+  const moved = await waitFor(async () => (await loadState()).tasks.find(task => task.id === initial.id && task.date === tomorrowKey), 'agenda move preserves ID');
+  assert.deepEqual(moved, { ...initial, date: tomorrowKey });
+  await row(tomorrow, movingTitle).getByRole('checkbox').check();
+  const completed = await waitFor(async () => (await loadState()).tasks.find(task => task.id === initial.id && task.done), 'completion saved on the planned date');
+  assert.equal(completed.date, tomorrowKey);
+  assert.equal(await row(tomorrow, movingTitle).getByRole('button', { name: /^移到今天/ }).count(), 0);
+  assert.match(await row(tomorrow, movingTitle).getAttribute('class'), /\bdone\b/);
+
+  await page.getByRole('button', { name: '新建待办', exact: true }).click();
+  let modal = page.getByRole('dialog', { name: '新建待办' });
+  await modal.getByTestId('task-title-input').fill(backlogTitle);
+  await modal.getByLabel(/安排日期/).fill('');
+  await modal.getByTestId('add-task-submit').click();
+  const backlog = page.getByTestId('agenda-backlog');
+  await backlog.locator('summary').click();
+  const unscheduled = await waitFor(async () => (await loadState()).tasks.find(task => task.title === backlogTitle), 'backlog task persists');
+  assert.equal(unscheduled.date, '');
+  await row(backlog, backlogTitle).getByRole('button', { name: `移到今天 ${backlogTitle}`, exact: true }).click();
+  await row(today, backlogTitle).waitFor();
+  await waitFor(async () => (await loadState()).tasks.some(task => task.id === unscheduled.id && task.date === todayKey), 'explicit backlog scheduling persists');
+
+  await page.getByRole('button', { name: '新建待办', exact: true }).click();
+  modal = page.getByRole('dialog', { name: '新建待办' });
+  await modal.getByTestId('task-title-input').fill(templateTitle);
+  await modal.getByLabel(/拆成小步骤/).fill('确认议题和参会人\n自定义安排');
+  await modal.getByLabel(/预计用时/).fill('55');
+  await modal.getByLabel(/待办模板/).selectOption('准备会议');
+  await modal.getByTestId('add-task-submit').click();
+  const templated = await waitFor(async () => (await loadState()).tasks.find(task => task.title === templateTitle), 'template preserves custom draft');
+  assert.equal(templated.estimate, 55);
+  assert.deepEqual(templated.steps.map(step => step.title), ['确认议题和参会人', '自定义安排', '预订会议室或建立会议链接', '发送议程和材料']);
+
+  await page.screenshot({ path: path.join(evidenceDir, 'two-day-agenda.png') });
+  await page.setViewportSize({ width: 1000, height: 600 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await tomorrow.getByRole('textbox', { name: '明天待办名称' }).focus();
+  assert.equal(await tomorrow.getByRole('textbox', { name: '明天待办名称' }).evaluate(element => element === document.activeElement), true);
+  await close();
+  await launch();
+  await open();
+  const restartedTask = row(page.getByTestId('agenda-tomorrow'), movingTitle);
+  await restartedTask.waitFor();
+  assert.equal(await restartedTask.getByRole('checkbox').isChecked(), true);
+  assert.deepEqual((await loadState()).tasks.find(task => task.id === historical.id), historical);
+  measurements.dayAgenda = { status: 'PASS', quickEntry: true, rescheduleRetainedOriginalId: true, completedKeptPlannedDate: true, backlogExplicit: true, templatePreservedDraft: true, historicalRecordUnchanged: true, restart: true, narrowViewport: '1000x600' };
+}
+
 async function main() {
   await launch();
   assert.equal(measurements.version, require('../package.json').version);
@@ -590,6 +660,7 @@ async function main() {
   assert.equal((await loadState()).tasks.length, 3);
 
   await testWorkspaceUpgrade();
+  await testDayAgenda();
 
   assert.deepEqual(errors, [], 'renderer must not emit runtime errors');
   const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];

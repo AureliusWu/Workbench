@@ -3,6 +3,7 @@ import {
   Flower2,
   LayoutDashboard,
   CalendarDays,
+  CalendarRange,
   ListTodo,
   StickyNote,
   ChartNoAxesCombined,
@@ -26,6 +27,7 @@ import {
   Coffee,
   Sparkles,
   ArrowUpRight,
+  ArrowLeftRight,
   Trash2,
   ChevronDown,
   ChevronUp,
@@ -59,6 +61,9 @@ import { WeekCalendar } from "./components/WeekCalendar";
 import { ReviewTools } from "./components/ReviewTools";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { WorkspaceSearch } from "./components/WorkspaceSearch";
+import { DayAgenda } from "./components/DayAgenda";
+import { agendaBacklog, canRescheduleTask, rescheduleTask } from "./lib/dayAgenda";
+import { appendTemplateSteps, taskTemplates } from "./lib/taskTemplates";
 import { parseQuickTask } from "./lib/quickTask";
 import "./workspace.css";
 import {
@@ -79,9 +84,10 @@ import {
   upsertTasks,
 } from "./lib";
 
-type View = "today" | "calendar" | "tasks" | "notes" | "review" | "files";
+type View = "today" | "agenda" | "calendar" | "tasks" | "notes" | "review" | "files";
 const nav = [
   { id: "today", label: "今日工作台", icon: LayoutDashboard },
+  { id: "agenda", label: "两日清单", icon: CalendarRange },
   { id: "calendar", label: "日历日程", icon: CalendarDays },
   { id: "tasks", label: "待办清单", icon: ListTodo },
   { id: "notes", label: "灵感便签", icon: StickyNote },
@@ -483,26 +489,32 @@ export default function App() {
     setTaskDateOverride(date ?? null);
     setTaskModal("new");
   }, []);
+  function addQuickTask(title: string, date: string, time = "", reminder = false) {
+    const name = title.trim();
+    if (!name || name.length > 300) throw new Error("待办名称需为 1 至 300 字。");
+    if (state.tasks.length >= 50000) throw new Error("待办已达到 50000 条上限。");
+    const task: Task = {
+      id: uid(),
+      title: name,
+      date,
+      time,
+      reminder,
+      priority: "medium",
+      done: false,
+      createdAt: new Date().toISOString(),
+      steps: [],
+      repeat: "none",
+      estimate: 25,
+    };
+    change((current) => ({ ...current, tasks: [...current.tasks, task] }));
+  }
   function submitQuickTask() {
     try {
       const { title, date, time, reminder, warning } = parseQuickTask(
         quickText,
         today,
       );
-      const task: Task = {
-        id: uid(),
-        title,
-        date,
-        time,
-        reminder,
-        priority: "medium",
-        done: false,
-        createdAt: new Date().toISOString(),
-        steps: [],
-        repeat: "none",
-        estimate: 25,
-      };
-      change((current) => ({ ...current, tasks: [...current.tasks, task] }));
+      addQuickTask(title, date, time, reminder);
       const taskWeek = weekStart(date || today);
       setDashboardWeek(taskWeek === currentWeek ? null : taskWeek);
       setQuickText("");
@@ -528,6 +540,15 @@ export default function App() {
   const activeToday = useMemo(
     () => tasksForDate(state.tasks, today),
     [state.tasks, today],
+  );
+  const tomorrow = addDays(today, 1);
+  const tomorrowTasks = useMemo(
+    () => view === "agenda" ? tasksForDate(state.tasks, tomorrow) : [],
+    [state.tasks, tomorrow, view],
+  );
+  const planningBacklog = useMemo(
+    () => view === "agenda" ? agendaBacklog(state.tasks, today) : [],
+    [state.tasks, today, view],
   );
   const doneToday = activeToday.filter((t) => t.done).length;
   const focusToday = state.focusSessions
@@ -616,7 +637,10 @@ export default function App() {
     setNoteTagIds([]);
     tell("想法已收好");
   };
-  function taskRow(t: Task) {
+  function taskRow(t: Task, moveTo?: string) {
+    const moveLabel = moveTo && canRescheduleTask(t)
+      ? (moveTo === tomorrow ? "移到明天" : "移到今天")
+      : undefined;
     return (
       <TaskRow
         key={t.id}
@@ -624,6 +648,16 @@ export default function App() {
         onToggle={() => toggle(t)}
         onEdit={() => setTaskModal(t)}
         onDelete={() => remove(t)}
+        moveLabel={moveLabel}
+        onMove={moveTo && moveLabel ? () => {
+          try {
+            const tasks = rescheduleTask(state.tasks, t.id, moveTo);
+            change((current) => ({ ...current, tasks }));
+            tell(`已${moveLabel}`);
+          } catch (error) {
+            tell(error instanceof Error ? error.message : String(error));
+          }
+        } : undefined}
         onStep={(id) =>
           change((s) => ({ ...s, tasks: toggleTaskStep(s.tasks, t.id, id) }))
         }
@@ -1179,7 +1213,7 @@ export default function App() {
                       aria-label="所选周的待办清单"
                     >
                       {dashboardTasks.length ? (
-                        dashboardTasks.map(taskRow)
+                        dashboardTasks.map((task) => taskRow(task))
                       ) : (
                         <p className="subtle week-panel-empty">
                           这周还没有待办。
@@ -1394,7 +1428,7 @@ export default function App() {
                 </label>
                 <div className="task-list">
                   {dayTasks.length ? (
-                    dayTasks.map(taskRow)
+                    dayTasks.map((task) => taskRow(task))
                   ) : (
                     <div className="empty-state small-empty">
                       <CalendarDays size={28} />
@@ -1414,6 +1448,18 @@ export default function App() {
                 </p>
               </section>
             </div>
+          )}
+          {view === "agenda" && (
+            <DayAgenda
+              today={today}
+              tomorrow={tomorrow}
+              todayTasks={activeToday}
+              tomorrowTasks={tomorrowTasks}
+              backlog={planningBacklog}
+              settings={state.settings}
+              onAdd={addQuickTask}
+              renderTask={taskRow}
+            />
           )}
           {view === "tasks" && (
             <section className="card all-tasks">
@@ -1463,7 +1509,7 @@ export default function App() {
                         Number(a.done) - Number(b.done) ||
                         a.date.localeCompare(b.date),
                     );
-                  return ts.length ? ts.map(taskRow) : taskEmpty;
+                  return ts.length ? ts.map((task) => taskRow(task)) : taskEmpty;
                 })()}
               </div>
             </section>
@@ -1952,12 +1998,16 @@ function TaskRow({
   onEdit,
   onDelete,
   onStep,
+  onMove,
+  moveLabel,
 }: {
   task: Task;
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onStep: (id: string) => void;
+  onMove?: () => void;
+  moveLabel?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   return (
@@ -1992,6 +2042,17 @@ function TaskRow({
           </div>
         </div>
         <div className="task-actions">
+          {onMove && moveLabel && (
+            <button
+              type="button"
+              className="icon-button agenda-move"
+              title={moveLabel}
+              aria-label={`${moveLabel} ${t.title}`}
+              onClick={onMove}
+            >
+              <ArrowLeftRight size={15} />
+            </button>
+          )}
           {t.steps.length > 0 && (
             <button
               className="step-toggle"
@@ -2056,6 +2117,7 @@ function TaskModal({
     existing?.repeat || "none",
   );
   const [estimate, setEstimate] = useState(existing?.estimate ?? 25);
+  const [estimateEdited, setEstimateEdited] = useState(false);
   const [reminder, setReminder] = useState(existing?.reminder || false);
   const [steps, setSteps] = useState(
     existing?.steps.map((s) => s.title).join("\n") || "",
@@ -2156,6 +2218,24 @@ function TaskModal({
             }
           }}
         >
+          {!existing && (
+            <label className="field task-template-field">
+              待办模板（可选）
+              <select
+                value=""
+                onChange={(event) => {
+                  const template = taskTemplates.find((item) => item.title === event.target.value);
+                  if (!template) return;
+                  setTitle((current) => current.trim() ? current : template.title);
+                  setSteps((current) => appendTemplateSteps(current, template.steps));
+                  if (!estimateEdited) setEstimate(template.minutes);
+                }}
+              >
+                <option value="">选择模板以补充可勾选步骤</option>
+                {taskTemplates.map((item) => <option key={item.title} value={item.title}>{item.title}</option>)}
+              </select>
+            </label>
+          )}
           <label className="field">
             待办名称
             <input
@@ -2242,7 +2322,10 @@ function TaskModal({
                 max={Math.max(100000, existing?.estimate ?? 0)}
                 step="any"
                 value={estimate}
-                onChange={(e) => setEstimate(Number(e.target.value))}
+                onChange={(e) => {
+                  setEstimate(Number(e.target.value));
+                  setEstimateEdited(true);
+                }}
               />
             </label>
             {split && (
