@@ -18,7 +18,7 @@ assert.equal(path.basename(installer), `Workbench-Setup-${expectedVersion}-win-x
 fs.mkdirSync(evidenceDir, { recursive: true });
 const report = { status: 'FAIL', expectedVersion, executable, profile, installer, injection: 'Privileged main-process test factory with temporary key and mapped fetch; no production key access' };
 const protectedNames = ['workbench.json', 'workbench.json.bak', 'ai-key.bin', 'notification-ledger.json'];
-let app, page, closed = false, server, manifestMode = 'tampered';
+let app, page, oldPid, oldProcessExited = false, server, manifestMode = 'tampered';
 const requests = [];
 
 async function hashFile(file) {
@@ -42,6 +42,34 @@ async function until(check, description, timeout = 90000) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error(`Timed out: ${description}`);
+}
+
+function hasProcessExited(pid) {
+  try { process.kill(pid, 0); return false; }
+  catch (error) {
+    if (error.code === 'ESRCH') return true;
+    throw error;
+  }
+}
+
+async function closeRemainingFixture() {
+  if (!app) return;
+  if (!oldProcessExited && (!oldPid || !hasProcessExited(oldPid))) {
+    let closeTimeout;
+    try {
+      await Promise.race([
+        app.close(),
+        new Promise((_, reject) => { closeTimeout = setTimeout(() => reject(new Error('Old Playwright fixture cleanup timed out.')), 5000); }),
+      ]);
+    } catch (error) { report.cleanupFailure = error.message; }
+    finally { clearTimeout(closeTimeout); }
+  }
+  // Playwright emits close only after its Windows shell wrapper and stdio close.
+  // A restarted process can keep those inherited handles open after the old PID exits.
+  const wrapper = app.process();
+  wrapper?.stdin?.destroy();
+  wrapper?.stdout?.destroy();
+  wrapper?.stderr?.destroy();
 }
 
 async function main() {
@@ -69,9 +97,11 @@ async function main() {
   delete env.WORKBENCH_DEV_URL;
   delete env.ELECTRON_RUN_AS_NODE;
   app = await electron.launch({ executablePath: path.resolve(executable), args: [], cwd: path.dirname(executable), env, timeout: 30000 });
-  app.on('close', () => { closed = true; });
   assert.equal(await app.evaluate(({ app }) => app.isPackaged), true);
   assert.equal(path.resolve(await app.evaluate(({ app }) => app.getPath('userData'))).toLowerCase(), path.resolve(profile).toLowerCase());
+  oldPid = await app.evaluate(() => process.pid);
+  assert.ok(Number.isSafeInteger(oldPid) && oldPid > 0 && !hasProcessExited(oldPid));
+  report.oldProcessId = oldPid;
   page = await app.firstWindow();
   await page.waitForFunction(() => Boolean(window.workbench?.getUpdate), undefined, { timeout: 20000 });
   const productionState = await until(async () => {
@@ -149,11 +179,11 @@ async function main() {
   report.preInstallProtectedHashes = await protectedHashes();
   assert.ok(report.preInstallProtectedHashes['workbench.json'] && report.preInstallProtectedHashes['ai-key.bin']);
   await page.screenshot({ path: path.join(evidenceDir, 'updater-ready.png'), fullPage: true });
-  const closePromise = app.waitForEvent('close', { timeout: 90000 });
   await page.evaluate(() => window.workbench.installUpdate()).catch(error => {
     if (!/closed|destroyed|disconnect/i.test(error.message)) throw error;
   });
-  await closePromise;
+  await until(() => hasProcessExited(oldPid), `Windows process ${oldPid} to exit for installation`);
+  oldProcessExited = true;
   report.status = 'PASS';
   report.backgroundCheckAndDownload = true;
   report.downloadedInstallerSha256 = payload.sha256;
@@ -173,12 +203,12 @@ main().catch(async error => {
       fs.copyFileSync(path.join(updates,name),path.join(evidenceDir,name));
     }
   }catch{}
-  if (page && !page.isClosed()) await page.screenshot({ path: path.join(evidenceDir, 'updater-failure.png'), fullPage: true }).catch(() => {});
+  if (page && !page.isClosed() && (!oldPid || !hasProcessExited(oldPid))) await page.screenshot({ path: path.join(evidenceDir, 'updater-failure.png'), fullPage: true, timeout: 3000 }).catch(() => {});
   console.error(report.failure);
   process.exitCode = 1;
 }).finally(async () => {
-  if (app && !closed) await app.close().catch(() => {});
+  await closeRemainingFixture();
   if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
   fs.writeFileSync(path.join(evidenceDir, 'updater-results.json'), JSON.stringify(report, null, 2));
-  console.log(JSON.stringify(report));
+  process.stdout.write(`${JSON.stringify(report)}\n`, () => process.exit(process.exitCode ?? 0));
 });
