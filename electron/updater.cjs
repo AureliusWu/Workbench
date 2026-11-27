@@ -205,11 +205,12 @@ async function launchInstaller({installer,manifest,cacheDirectory,executable=pro
   try{
     // Windows PowerShell 5.1 requires a BOM for UTF-8 source containing non-ASCII.
     // Use -File instead of an encoded command or hidden/detached console flags.
-    // The helper is generated locally, never downloaded. Detach it from the
-    // Electron parent and keep its output in a file, not an inherited pipe.
+    // Do not use DETACHED_PROCESS: Windows PowerShell 5.1 can exit 0 without
+    // running the script. Ignored stdin, file output and unref let the helper
+    // survive a normal parent exit without inherited pipes or a visible window.
     await fsp.writeFile(scriptFile,'\uFEFF'+script,{flag:'wx',mode:0o600});
     diagnostic=await fsp.open(diagnosticFile,'wx',0o600);
-    child=spawnImpl(powershell,['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptFile],{windowsHide:true,detached:true,stdio:['ignore',diagnostic.fd,diagnostic.fd]});
+    child=spawnImpl(powershell,['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptFile],{windowsHide:true,stdio:['ignore',diagnostic.fd,diagnostic.fd]});
     child.once('exit',(code)=>{exited=true;exitCode=code;});
     await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});
     child.unref();

@@ -19,14 +19,15 @@ test('actual Windows PowerShell handoff signals readiness and honors cancellatio
   const payload=Buffer.from('not an executable; cancellation must prevent any launch');
   const installer=path.join(directory,'fixture.exe');
   await fs.writeFile(installer,payload);
-  const parent=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:'ignore'});
+  const parent=spawn(process.execPath,['-e',"process.stdin.resume();process.stdin.once('data',()=>process.exit(0));"],{windowsHide:true,stdio:['pipe','ignore','ignore']});
   try{
     await once(parent,'spawn');
     const result=await updater.launchInstaller({installer,manifest:{version:'1.2.0',size:payload.length,sha256:crypto.createHash('sha256').update(payload).digest('hex')},cacheDirectory:directory,executable:process.execPath,parentPid:parent.pid});
     assert.equal(parent.exitCode,null);
     assert.equal(parent.signalCode,null);
     await fs.writeFile(result.cancelFile,'cancel');
-    const closed=once(parent,'exit');parent.kill();await closed;
+    const closed=once(parent,'exit');parent.stdin.end('exit');const [exitCode,exitSignal]=await closed;
+    assert.equal(exitCode,0);assert.equal(exitSignal,null);
     await until(async()=>{try{await fs.access(result.scriptFile);return false;}catch{return true;}});
     await assert.rejects(fs.access(path.join(directory,'last-update-error.txt')));
     assert.equal((await fs.readFile(installer)).equals(payload),true);
