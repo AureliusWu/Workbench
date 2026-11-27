@@ -116,7 +116,7 @@ async function detectInstalled({platform=process.platform,isPackaged,executable=
   return {enabled:true,reason:'',directory,uninstaller};
 }
 function encodedPath(value){return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(value,'utf8').toString('base64')}'))`;}
-function handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256,size,expectedVersion}){
+function handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256,size,expectedVersion,diagnosticFile=path.join(path.dirname(readyFile),'handoff.log')}){
   if(!Number.isSafeInteger(parentPid)||parentPid<1||!/^[a-f0-9]{64}$/.test(sha256)||!Number.isSafeInteger(size)||size<1)throw new Error('更新交接参数无效。');
   stableVersion(expectedVersion);
   return `$ErrorActionPreference='Stop'
@@ -125,8 +125,9 @@ $application=${encodedPath(executable)}
 $ready=${encodedPath(readyFile)}
 $cancel=${encodedPath(cancelFile)}
 $failure=${encodedPath(errorFile)}
+$diagnostic=${encodedPath(diagnosticFile)}
 function Write-Phase([string]$message) {
-  [Console]::WriteLine([DateTime]::UtcNow.ToString('o')+' '+$message)
+  [IO.File]::AppendAllText($diagnostic,[DateTime]::UtcNow.ToString('o')+' '+$message+[Environment]::NewLine,[Text.Encoding]::UTF8)
 }
 function Start-UpdateProcess([string]$file,[string]$arguments,[bool]$hidden) {
   $info=[Diagnostics.ProcessStartInfo]::new()
@@ -170,7 +171,8 @@ try {
   if (![IO.File]::Exists($application)) { throw '安装完成后找不到工作台程序。' }
   $installedVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($application).ProductVersion
   Write-Phase ("installed-version="+$installedVersion)
-  if ($installedVersion -ne '${expectedVersion}') { throw ('更新后版本不匹配：'+$installedVersion) }
+  # Windows version resources may add an unused fourth, zero-valued component.
+  if ($installedVersion -ne '${expectedVersion}' -and $installedVersion -ne '${expectedVersion}.0') { throw ('更新后版本不匹配：'+$installedVersion) }
   $restarted=Start-UpdateProcess $application '' $false
   Write-Phase ("application-started pid="+$restarted.Id)
   if ($restarted.WaitForExit(1500)) {
@@ -195,22 +197,28 @@ try {
 }`;
 }
 async function launchInstaller({installer,manifest,cacheDirectory,executable=process.execPath,parentPid=process.pid,spawnImpl=spawn}){
-  const token=crypto.randomUUID(),readyFile=path.join(cacheDirectory,`handoff-${token}.ready`),cancelFile=path.join(cacheDirectory,`handoff-${token}.cancel`),errorFile=path.join(cacheDirectory,'last-update-error.txt'),scriptFile=path.join(cacheDirectory,`handoff-${token}.ps1`);
+  const token=crypto.randomUUID(),readyFile=path.join(cacheDirectory,`handoff-${token}.ready`),cancelFile=path.join(cacheDirectory,`handoff-${token}.cancel`),errorFile=path.join(cacheDirectory,'last-update-error.txt'),scriptFile=path.join(cacheDirectory,`handoff-${token}.ps1`),diagnosticFile=path.join(cacheDirectory,`handoff-${token}.log`);
   await fsp.unlink(errorFile).catch(()=>{});
-  const script=handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256:manifest.sha256,size:manifest.size,expectedVersion:manifest.version});
+  const script=handoffScript({installer,executable,parentPid,readyFile,cancelFile,errorFile,sha256:manifest.sha256,size:manifest.size,expectedVersion:manifest.version,diagnosticFile});
   const powershell=path.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
+  const commandHost=path.join(process.env.SystemRoot||'C:\\Windows','System32','cmd.exe');
   let child,exitCode,exited=false;
-  const diagnosticFile=path.join(cacheDirectory,`handoff-${token}.log`);
   let diagnostic;
   try{
     // Windows PowerShell 5.1 requires a BOM for UTF-8 source containing non-ASCII.
     // Use -File instead of an encoded command or hidden/detached console flags.
-    // Do not use DETACHED_PROCESS: Windows PowerShell 5.1 can exit 0 without
-    // running the script. Ignored stdin, file output and unref let the helper
-    // survive a normal parent exit without inherited pipes or a visible window.
+    // Detach cmd, not PowerShell: direct detached WinPS can silently exit, while
+    // an attached child dies with libuv's owner job. cmd starts WinPS outside that job.
+    // Quote fixed environment references instead of interpolating file paths into shell code.
+    // /D disables AutoRun; /V:OFF keeps exclamation marks literal. Expansion is one pass.
     await fsp.writeFile(scriptFile,'\uFEFF'+script,{flag:'wx',mode:0o600});
     diagnostic=await fsp.open(diagnosticFile,'wx',0o600);
-    child=spawnImpl(powershell,['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptFile],{windowsHide:true,stdio:['ignore',diagnostic.fd,diagnostic.fd]});
+    await diagnostic.close();diagnostic=null;
+    const launcherEnv=Object.fromEntries(Object.entries(process.env).filter(([name])=>!['WORKBENCH_UPDATE_POWERSHELL','WORKBENCH_UPDATE_SCRIPT'].includes(name.toUpperCase())));
+    launcherEnv.WORKBENCH_UPDATE_POWERSHELL=powershell;
+    launcherEnv.WORKBENCH_UPDATE_SCRIPT=scriptFile;
+    const command='""%WORKBENCH_UPDATE_POWERSHELL%" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%WORKBENCH_UPDATE_SCRIPT%""';
+    child=spawnImpl(commandHost,['/D','/V:OFF','/S','/C',command],{windowsHide:true,detached:true,windowsVerbatimArguments:true,env:launcherEnv,stdio:'ignore'});
     child.once('exit',(code)=>{exited=true;exitCode=code;});
     await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});
     child.unref();

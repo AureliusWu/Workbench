@@ -105,20 +105,42 @@ function Uninstall-OwnTest {
   while (@(Get-InstallRecords).Count -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 150 }
   if (@(Get-InstallRecords).Count) { throw 'Test uninstall registration was not removed.' }
 }
-function Wait-UpdatedApplication {
+function Test-ExpectedPeVersion([string] $Actual, [string] $Expected) {
+  # Windows PE metadata may append a zero revision to the stable npm version.
+  # Do not accept another revision, leading-zero version, or suffix.
+  return ($Expected -cmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -and
+    ($Actual -ceq $Expected -or $Actual -ceq ($Expected + '.0')))
+}
+function Get-CompletedHandoffRestart([string] $PhaseLog) {
+  $started = [regex]::Matches($PhaseLog, '(?m)^\S+ application-started pid=([1-9][0-9]*)\r?$')
+  $dispatched = [regex]::Matches($PhaseLog, '(?m)^\S+ restart-dispatched\r?$')
+  if ($started.Count -ne 1 -or $dispatched.Count -ne 1 -or $dispatched[0].Index -le $started[0].Index) { return $null }
+  if ($PhaseLog -match '(?m)^\S+ (failure:|recovery-started|recovery-failed:)') { return $null }
+  return [PSCustomObject]@{ ProcessId = [int]::Parse($started[0].Groups[1].Value) }
+}
+function Wait-UpdatedApplication([string] $HandoffLog) {
   $expectedExe = [System.IO.Path]::GetFullPath((Join-Path $installPath 'Workbench.exe'))
   $deadline = [DateTime]::UtcNow.AddSeconds(90)
+  $phaseLog = ''
+  $handoffReadError = $null
   while ([DateTime]::UtcNow -lt $deadline) {
-    $candidates = @(Get-CimInstance Win32_Process -Filter "name='Workbench.exe'" | Where-Object {
-      $_.ExecutablePath -and [System.IO.Path]::GetFullPath($_.ExecutablePath) -eq $expectedExe -and $_.CommandLine -notmatch '--type='
-    })
-    foreach ($candidate in $candidates) {
-      $nativeProcess = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
-      if ($nativeProcess -and $nativeProcess.MainWindowHandle -ne 0 -and $nativeProcess.MainWindowTitle) {
-        $details = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($expectedExe)
-        if ($details.ProductVersion -eq $version) {
-          Start-Sleep -Milliseconds 500
-          return [PSCustomObject]@{ ProcessId = $candidate.ProcessId; Executable = $expectedExe; WindowTitle = $nativeProcess.MainWindowTitle; Version = $details.ProductVersion }
+    try { $phaseLog = [IO.File]::ReadAllText($HandoffLog); $handoffReadError = $null }
+    catch { $handoffReadError = $_.Exception.Message }
+    $restart = Get-CompletedHandoffRestart $phaseLog
+    # The helper waits 1500ms before restart-dispatched. Never stop its new app
+    # during that interval: doing so would cause a false failure and recovery.
+    if ($restart) {
+      $candidates = @(Get-CimInstance Win32_Process -Filter "name='Workbench.exe'" | Where-Object {
+        $_.ProcessId -eq $restart.ProcessId -and $_.ExecutablePath -and
+        [System.IO.Path]::GetFullPath($_.ExecutablePath) -eq $expectedExe -and $_.CommandLine -notmatch '--type='
+      })
+      foreach ($candidate in $candidates) {
+        $nativeProcess = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+        if ($nativeProcess -and $nativeProcess.MainWindowHandle -ne 0 -and $nativeProcess.MainWindowTitle) {
+          $details = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($expectedExe)
+          if (Test-ExpectedPeVersion $details.ProductVersion $version) {
+            return [PSCustomObject]@{ ProcessId = $candidate.ProcessId; Executable = $expectedExe; WindowTitle = $nativeProcess.MainWindowTitle; Version = $details.ProductVersion; HandoffLog = $HandoffLog; HelperRestartDispatched = $true }
+          }
         }
       }
     }
@@ -128,10 +150,13 @@ function Wait-UpdatedApplication {
     registration = @(Get-InstallRecords)
     installedVersion = if (Test-Path -LiteralPath $expectedExe) { [Diagnostics.FileVersionInfo]::GetVersionInfo($expectedExe).ProductVersion } else { 'missing' }
     processes = @(Get-CimInstance Win32_Process -Filter "name='Workbench.exe'" | Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine)
+    handoffLog = $HandoffLog
+    handoffPhases = $phaseLog
+    handoffReadError = $handoffReadError
   }
   $lastError = Join-Path $profilePath 'updates\last-update-error.txt'
   if (Test-Path -LiteralPath $lastError) { $report.restartDiagnostics.helperError = Get-Content -LiteralPath $lastError -Raw }
-  throw 'Updater did not restart the new installed application with a visible main window.'
+  throw 'Updater did not complete helper restart-dispatched and expose that same new process with the expected version and a visible main window.'
 }
 function Stop-OwnRestartedApplication($Observed) {
   if ([System.IO.Path]::GetFullPath($Observed.Executable) -ne [System.IO.Path]::GetFullPath((Join-Path $installPath 'Workbench.exe'))) { throw 'Refusing to stop a process outside the test install directory.' }
@@ -171,12 +196,17 @@ try {
   $oldProgramHash = Get-Sha256 (Join-Path $installPath 'resources\app.asar')
   Set-Content -LiteralPath (Join-Path $installPath 'old-program-sentinel.txt') -Value 'The replacement install must remove this old program file.'
   if ($UseUpdater) {
+    $updatesPath = Join-Path $profilePath 'updates'
+    $priorHandoffLogs = @(Get-ChildItem -LiteralPath $updatesPath -Filter 'handoff-*.log' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     & node (Join-Path $PSScriptRoot 'updater-lifecycle.cjs') (Join-Path $installPath 'Workbench.exe') $profilePath $InstallerPath $version $evidencePath | Write-Host
     if ($LASTEXITCODE -ne 0) { throw 'Secure background updater fixture check failed.' }
     $report.updater = Get-Content -LiteralPath (Join-Path $evidencePath 'updater-results.json') -Raw | ConvertFrom-Json
     $beforeUpgrade = [ordered]@{}
     foreach ($property in $report.updater.preInstallProtectedHashes.PSObject.Properties) { $beforeUpgrade[$property.Name] = $property.Value }
-    $report.restartedApplication = Wait-UpdatedApplication
+    $newHandoffLogs = @(Get-ChildItem -LiteralPath $updatesPath -Filter 'handoff-*.log' -File | Where-Object { $priorHandoffLogs -notcontains $_.FullName })
+    if ($newHandoffLogs.Count -ne 1) { throw "Expected exactly one helper log for this update attempt; found $($newHandoffLogs.Count)." }
+    $report.updaterHandoffLog = $newHandoffLogs[0].FullName
+    $report.restartedApplication = Wait-UpdatedApplication $report.updaterHandoffLog
     Stop-OwnRestartedApplication $report.restartedApplication
     $report.backgroundUpdateAndRestart = $true
   } else {
