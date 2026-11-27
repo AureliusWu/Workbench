@@ -243,12 +243,13 @@ function loadPreference(file){try{const value=JSON.parse(fs.readFileSync(file,'u
 async function persistPreference(file,automatic){await fsp.mkdir(path.dirname(file),{recursive:true});const temporary=`${file}.tmp`;const handle=await fsp.open(temporary,'w',0o600);try{await handle.writeFile(JSON.stringify({automatic}));await handle.sync();}finally{await handle.close();}await fsp.rename(temporary,file);}
 function createUpdateController({currentVersion,publicKey,userDataDirectory,eligibility={enabled:false,reason:'自动更新不可用。'},fetchImpl=fetch,onState=()=>{},onQuit=()=>{},launch=launchInstaller,autoStart=true,initialDelayMs=15000,intervalMs=6*60*60*1000}={}){
   stableVersion(currentVersion);const cacheDirectory=path.join(userDataDirectory,'updates'),preferenceFile=path.join(userDataDirectory,'updater-settings.json');
-  let automatic=loadPreference(preferenceFile),disposed=false,pending=null,verifiedManifest=null,verifiedPath=null,timer=null,interval=null,preferenceQueue=Promise.resolve();
+  let automatic=loadPreference(preferenceFile),disposed=false,pending=null,verifiedManifest=null,verifiedPath=null,timer=null,interval=null,preferenceQueue=Promise.resolve(),preferenceRevision=0;
   let value={enabled:Boolean(eligibility.enabled),automatic,status:eligibility.enabled?'idle':'disabled',currentVersion,message:eligibility.enabled?'会自动检查并准备新版，安装前由你确认。':eligibility.reason};
   const failureFile=path.join(cacheDirectory,'last-update-error.txt');try{const failure=fs.readFileSync(failureFile,'utf8').replace(/^\uFEFF/,'').trim().slice(0,500);if(failure&&eligibility.enabled)value={...value,status:'error',message:failure};}catch{}
   const snapshot=()=>({...value});
   function emit(patch){if(disposed)return;value={...value,...patch,automatic};onState(snapshot());}
-  function schedule(){clearTimeout(timer);clearInterval(interval);if(disposed||!automatic||!eligibility.enabled)return;timer=setTimeout(()=>{void check();},initialDelayMs);timer.unref?.();interval=setInterval(()=>{void check();},intervalMs);interval.unref?.();}
+  function stopSchedule(){clearTimeout(timer);clearInterval(interval);}
+  function schedule(){stopSchedule();if(disposed||!automatic||!eligibility.enabled)return;timer=setTimeout(()=>{void check();},initialDelayMs);timer.unref?.();interval=setInterval(()=>{void check();},intervalMs);interval.unref?.();}
   async function check(){
     if(disposed||!eligibility.enabled||value.status==='installing'||value.status==='ready')return snapshot();if(pending)return pending;
     pending=(async()=>{
@@ -264,14 +265,25 @@ function createUpdateController({currentVersion,publicKey,userDataDirectory,elig
       }catch(error){verifiedManifest=null;verifiedPath=null;emit({status:'error',message:error.name==='AbortError'?'更新检查或下载超时，请稍后重试。':String(error.message||'更新暂不可用。').slice(0,500)});return snapshot();}finally{clearTimeout(timeout);pending=null;}
     })();return pending;
   }
-  async function setAutomatic(enabled){if(typeof enabled!=='boolean')throw new Error('自动更新设置不正确。');const operation=preferenceQueue.catch(()=>{}).then(async()=>{await persistPreference(preferenceFile,enabled);automatic=enabled;emit({});schedule();return snapshot();});preferenceQueue=operation;return operation;}
+  async function setAutomatic(enabled){
+    if(typeof enabled!=='boolean')throw new Error('自动更新设置不正确。');
+    const revision=++preferenceRevision;
+    // Stop timers before disk I/O. A slow write must not trigger a pending check.
+    stopSchedule();
+    const operation=preferenceQueue.catch(()=>{}).then(async()=>{
+      try{await persistPreference(preferenceFile,enabled);automatic=enabled;emit({});return snapshot();}
+      finally{if(revision===preferenceRevision)schedule();}
+    });
+    preferenceQueue=operation;
+    return operation;
+  }
   async function install(){
     if(!eligibility.enabled||value.status!=='ready'||!verifiedManifest||!verifiedPath)throw new Error('更新尚未准备好，请先检查更新。');
     emit({status:'installing',message:'正在保存并准备安装，请稍候…'});
     try{await preferenceQueue;verifyManifest(verifiedManifest,publicKey);if(compareVersions(verifiedManifest.version,currentVersion)<=0)throw new Error('已拒绝安装旧版本。');await verifyFile(verifiedPath,verifiedManifest);await launch({installer:verifiedPath,manifest:verifiedManifest,cacheDirectory});await onQuit();}catch(error){emit({status:'error',message:String(error.message||'无法开始安装，工作台会继续运行。').slice(0,500)});throw error;}
   }
   if(autoStart)schedule();
-  return {getState:snapshot,check,install,setAutomatic,dispose(){disposed=true;clearTimeout(timer);clearInterval(interval);}};
+  return {getState:snapshot,check,install,setAutomatic,dispose(){disposed=true;stopSchedule();}};
 }
 async function createWindowsUpdater({app,onState,onQuit,fetchImpl=fetch}={}){
   const eligibility=await detectInstalled({isPackaged:app.isPackaged});let publicKey='';

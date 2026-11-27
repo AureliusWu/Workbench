@@ -69,9 +69,17 @@ test('concurrent checks share one download and automatic preference is persisted
   const directory=folder(),calls=[],service=controller(directory,{fetchImpl:fixtureFetch(manifest(),bytes,calls)});
   try{const [a,b]=await Promise.all([service.check(),service.check()]);assert.equal(a.status,'ready');assert.equal(b.status,'ready');assert.equal(calls.length,2);await service.setAutomatic(false);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory,'updater-settings.json'),'utf8')),{automatic:false});assert.equal(fs.existsSync(path.join(directory,'workbench.json')),false);const restarted=controller(directory);assert.equal(restarted.getState().automatic,false);restarted.dispose();}finally{service.dispose();clean(directory);}
 });
-test('disabled installations never fetch and disabling automatic scheduling prevents checks',async()=>{
+test('disabled installations never fetch and disabling automatic scheduling prevents checks',async(t)=>{
   const directory=folder();let calls=0;const service=controller(directory,{eligibility:{enabled:false,reason:'portable fixture'},fetchImpl:async()=>{calls++;},autoStart:true,initialDelayMs:1,intervalMs:5});try{assert.equal((await service.check()).status,'disabled');await new Promise(resolve=>setTimeout(resolve,15));assert.equal(calls,0);}finally{service.dispose();clean(directory);}
-  const other=folder(),automatic=controller(other,{fetchImpl:async()=>{calls++;throw new Error('unexpected');},autoStart:true,initialDelayMs:100,intervalMs:100});try{await automatic.setAutomatic(false);await new Promise(resolve=>setTimeout(resolve,120));assert.equal(calls,0);}finally{automatic.dispose();clean(other);}
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  const other=folder(),automatic=controller(other,{fetchImpl:async()=>{calls++;throw new Error('unexpected');},autoStart:true,initialDelayMs:100,intervalMs:100});
+  try{
+    const saving=automatic.setAutomatic(false);
+    t.mock.timers.tick(120); // The previous schedule would fire before the preference is stored.
+    await saving;
+    t.mock.timers.tick(120);
+    assert.equal(calls,0);
+  }finally{automatic.dispose();clean(other);}
 });
 test('installed-mode detection needs packaged Windows, sibling uninstaller, and matching registry path',async()=>{
   const directory=folder();fs.writeFileSync(path.join(directory,'Workbench.exe'),'fixture');fs.writeFileSync(path.join(directory,'Uninstall Workbench.exe'),'fixture');const options={platform:'win32',isPackaged:true,portable:false,executable:path.join(directory,'Workbench.exe'),queryRegistry:async()=>directory};
